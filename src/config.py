@@ -1,7 +1,15 @@
 """Configuration module for BTC Signal Bot."""
 import os
+import logging
 from dataclasses import dataclass, field
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# Minimum training candles to ensure meaningful model training.
+# 10,000 5m candles ~ 34.7 days -- absolute floor for feature engineering
+# to produce enough valid samples after NaN drop.
+MIN_TRAIN_CANDLES = 10000
 
 
 @dataclass
@@ -119,5 +127,22 @@ class BotConfig:
             config.model.optuna_n_trials = int(os.environ["OPTUNA_TRIALS"])
         if os.environ.get("TRAIN_CANDLES"):
             config.model.train_candles = int(os.environ["TRAIN_CANDLES"])
+
+        # Enforce minimum training candles to prevent under-training
+        if config.model.train_candles < MIN_TRAIN_CANDLES:
+            logger.warning(
+                f"train_candles={config.model.train_candles} is below minimum "
+                f"{MIN_TRAIN_CANDLES}. Overriding to {MIN_TRAIN_CANDLES}."
+            )
+            config.model.train_candles = MIN_TRAIN_CANDLES
+
+        # Log final resolved config for diagnostics
+        logger.info(
+            f"Config loaded: train_candles={config.model.train_candles} "
+            f"(~{config.model.train_candles * 5 // 1440} days of 5m data), "
+            f"retrain_interval={config.model.retrain_interval_hours}h, "
+            f"confidence_min={config.model.confidence_min}, "
+            f"optuna={'ON' if config.model.enable_optuna_tuning else 'OFF'}"
+        )
 
         return config

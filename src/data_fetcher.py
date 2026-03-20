@@ -108,7 +108,9 @@ class MEXCFetcher:
         intervals: Optional[list] = None,
         limit: int = 500,
     ) -> dict[str, pd.DataFrame]:
-        """Fetch klines for multiple timeframes.
+        """Fetch klines for multiple timeframes (single batch, no pagination).
+
+        Used for real-time prediction where we only need the most recent candles.
 
         Args:
             intervals: List of intervals to fetch. Defaults to ["5m", "15m", "1h"]
@@ -139,6 +141,16 @@ class MEXCFetcher:
         "60m": 60 * 60 * 1000,
         "4h": 4 * 60 * 60 * 1000,
         "1d": 24 * 60 * 60 * 1000,
+    }
+
+    # Mapping from interval string to minutes per candle
+    INTERVAL_MINUTES = {
+        "5m": 5,
+        "15m": 15,
+        "1h": 60,
+        "60m": 60,
+        "4h": 240,
+        "1d": 1440,
     }
 
     async def fetch_historical_klines(
@@ -195,15 +207,73 @@ class MEXCFetcher:
                 # Full batch -- advance window
                 start_time = end_time + 1
 
-            logger.info(f"Fetched {fetched}/{total_candles} candles")
+            logger.info(f"Fetched {fetched}/{total_candles} {interval} candles")
 
         if not all_dfs:
             return pd.DataFrame()
 
         result = pd.concat(all_dfs, ignore_index=True)
         result = result.drop_duplicates(subset="timestamp").sort_values("timestamp").reset_index(drop=True)
-        logger.info(f"Total historical candles fetched: {len(result)}")
+        logger.info(f"Total historical {interval} candles fetched: {len(result)}")
         return result
+
+    async def fetch_historical_multi_timeframe(
+        self,
+        intervals: list[str],
+        train_candles_5m: int,
+    ) -> dict[str, pd.DataFrame]:
+        """Fetch paginated historical data for multiple higher timeframes.
+
+        Calculates the proportional number of candles needed for each
+        timeframe to cover the same calendar window as the 5m training data.
+
+        For example, if train_candles_5m=43200 (~150 days):
+          - 15m: 43200 * (5/15) = 14,400 candles (~150 days)
+          - 1h:  43200 * (5/60) = 3,600 candles  (~150 days)
+
+        Args:
+            intervals: List of higher-timeframe intervals (e.g. ["15m", "1h"])
+            train_candles_5m: Number of 5m candles being used for training
+
+        Returns:
+            Dict mapping interval -> DataFrame with full paginated historical data
+        """
+        results = {}
+
+        for interval in intervals:
+            try:
+                # Calculate proportional candle count for same time window
+                interval_minutes = self.INTERVAL_MINUTES.get(interval, 60)
+                proportional_candles = max(
+                    500,  # minimum useful amount
+                    int(train_candles_5m * 5 / interval_minutes) + 50,  # +50 buffer for NaN drop
+                )
+
+                logger.info(
+                    f"Fetching historical {interval} data: "
+                    f"{proportional_candles} candles "
+                    f"(~{proportional_candles * interval_minutes // 1440} days)"
+                )
+
+                df = await self.fetch_historical_klines(
+                    interval=interval,
+                    total_candles=proportional_candles,
+                )
+                results[interval] = df
+
+                if not df.empty:
+                    logger.info(
+                        f"Historical {interval}: {len(df)} candles, "
+                        f"from {df['timestamp'].iloc[0]} to {df['timestamp'].iloc[-1]}"
+                    )
+                else:
+                    logger.warning(f"Historical {interval}: no data returned")
+
+            except Exception as e:
+                logger.error(f"Failed to fetch historical {interval} klines: {e}")
+                results[interval] = pd.DataFrame()
+
+        return results
 
     async def close(self):
         """Close the HTTP client."""

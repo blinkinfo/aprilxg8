@@ -11,6 +11,7 @@ Fixes applied:
 - Dedup guard prevents double-resolution within the same window
 - Startup resolves any stale pending signals from prior sessions
 - All timestamps in UTC
+- Training now uses full paginated historical data for ALL timeframes (5m, 15m, 1h)
 """
 import asyncio
 import logging
@@ -399,28 +400,58 @@ class SignalBot:
             logger.error(f"Stale signal resolution error: {e}", exc_info=True)
 
     async def _train_model(self):
-        """Train or retrain the model."""
+        """Train or retrain the model.
+
+        Uses paginated historical fetch for ALL timeframes to ensure
+        higher-TF features (15m, 1h) cover the full training window,
+        not just the last 500 candles.
+        """
         try:
-            logger.info("Fetching training data...")
-            # Fetch historical 5m data (now 43,200 candles = ~150 days)
+            train_candles = self.config.model.train_candles
+            logger.info(
+                f"Fetching training data: {train_candles} 5m candles "
+                f"(~{train_candles * 5 // 1440} days)..."
+            )
+
+            # Fetch historical 5m data (paginated)
             df_5m = await self.fetcher.fetch_historical_klines(
                 interval="5m",
-                total_candles=self.config.model.train_candles,
+                total_candles=train_candles,
             )
 
             if df_5m.empty or len(df_5m) < 500:
-                logger.error(f"Insufficient training data: {len(df_5m)} candles")
+                logger.error(f"Insufficient 5m training data: {len(df_5m)} candles")
                 return
 
-            # Fetch higher timeframe data
-            higher_tf = await self.fetcher.fetch_multi_timeframe(
+            logger.info(
+                f"[DATA DIAGNOSTIC] 5m raw candles fetched: {len(df_5m)}, "
+                f"range: {df_5m['timestamp'].iloc[0]} to {df_5m['timestamp'].iloc[-1]}"
+            )
+
+            # Fetch higher timeframe data with FULL pagination
+            # (covers same calendar window as 5m data)
+            higher_tf = await self.fetcher.fetch_historical_multi_timeframe(
                 intervals=["15m", "1h"],
-                limit=500,
+                train_candles_5m=train_candles,
             )
             higher_tf = {k: v for k, v in higher_tf.items() if not v.empty}
 
+            # Log diagnostic info for higher TF data
+            for tf_name, tf_df in higher_tf.items():
+                logger.info(
+                    f"[DATA DIAGNOSTIC] {tf_name} candles fetched: {len(tf_df)}, "
+                    f"range: {tf_df['timestamp'].iloc[0]} to {tf_df['timestamp'].iloc[-1]}"
+                )
+
             # Train (model internally handles the retraining gate)
             metrics = self.model.train(df_5m, higher_tf)
+
+            # Log post-training diagnostics
+            logger.info(
+                f"[DATA DIAGNOSTIC] Post-training: "
+                f"{metrics['total_samples']} usable samples from {len(df_5m)} raw 5m candles "
+                f"({len(df_5m) - metrics['total_samples']} dropped by NaN/alignment)"
+            )
 
             # Save model
             self.model.save(self.config.model_dir)
