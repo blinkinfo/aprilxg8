@@ -12,6 +12,10 @@ Fixes applied:
 - Startup resolves any stale pending signals from prior sessions
 - All timestamps in UTC
 - Training now uses full paginated historical data for ALL timeframes (5m, 15m, 1h)
+
+UI/UX v2:
+- All message formatting delegated to formatters module
+- HTML parse mode via TelegramBot.send_message
 """
 import asyncio
 import logging
@@ -25,6 +29,7 @@ from .features import FeatureEngineer
 from .model import PredictionModel
 from .signal_tracker import SignalTracker
 from .telegram_bot import TelegramBot
+from . import formatters
 
 logger = logging.getLogger(__name__)
 
@@ -101,19 +106,16 @@ class SignalBot:
         await self._resolve_stale_signals()
 
         # Send startup message
-        optuna_status = "ON" if self.config.model.enable_optuna_tuning else "OFF"
-        await self.telegram.send_message(
-            "BTC 5m Signal Bot ONLINE (aprilxg v2)\n\n"
-            f"Model accuracy: {self.model.val_accuracy:.1%}\n"
-            f"Confidence threshold: {self.config.model.confidence_min:.0%}\n"
-            f"Training data: {self.config.model.train_candles} candles (~{self.config.model.train_candles * 5 // 1440} days)\n"
-            f"Optuna tuning: {optuna_status}\n"
-            f"Retraining gate: {self.config.model.retrain_min_improvement:.3f} min improvement\n"
-            f"Tracked signals: {len(self.tracker.signals)}\n"
-            f"Symbol: {self.config.mexc.symbol}\n\n"
-            "Signals will be posted automatically.\n"
-            "Use /stats /recent /status for info."
+        msg = formatters.format_startup(
+            model_accuracy=self.model.val_accuracy,
+            confidence_min=self.config.model.confidence_min,
+            train_candles=self.config.model.train_candles,
+            optuna_enabled=self.config.model.enable_optuna_tuning,
+            retrain_gate=self.config.model.retrain_min_improvement,
+            tracked_signals=len(self.tracker.signals),
+            symbol=self.config.mexc.symbol,
         )
+        await self.telegram.send_message(msg)
 
         # Main loop
         self._running = True
@@ -123,7 +125,7 @@ class SignalBot:
         """Stop the bot gracefully."""
         logger.info("Stopping bot...")
         self._running = False
-        await self.telegram.send_message("Bot shutting down...")
+        await self.telegram.send_message(formatters.format_shutdown())
         await self.telegram.stop()
         await self.fetcher.close()
         self.model.save(self.config.model_dir)
@@ -227,8 +229,8 @@ class SignalBot:
                     candle_open_price=candle_open_price,
                 )
 
-                # Send to Telegram
-                msg = self.tracker.format_signal_message(sig, prediction)
+                # Send formatted signal to Telegram
+                msg = formatters.format_signal(sig, prediction)
                 await self.telegram.send_message(msg)
                 logger.info(
                     f"Signal sent: {prediction['signal']} [{prediction.get('strength', 'NORMAL')}] "
@@ -319,7 +321,8 @@ class SignalBot:
                     candle_close=candle_data["close"],
                 )
                 if resolved:
-                    msg = self.tracker.format_resolution_message(resolved)
+                    stats = self.tracker.get_stats()
+                    msg = formatters.format_resolution(resolved, stats)
                     await self.telegram.send_message(msg)
 
         except Exception as e:
@@ -390,7 +393,8 @@ class SignalBot:
                 )
                 if resolved:
                     resolved_count += 1
-                    msg = self.tracker.format_resolution_message(resolved)
+                    stats = self.tracker.get_stats()
+                    msg = formatters.format_resolution(resolved, stats)
                     await self.telegram.send_message(msg)
 
             if resolved_count > 0:
@@ -443,6 +447,9 @@ class SignalBot:
                     f"range: {tf_df['timestamp'].iloc[0]} to {tf_df['timestamp'].iloc[-1]}"
                 )
 
+            # Capture previous accuracy for delta display
+            previous_accuracy = self.model.val_accuracy
+
             # Train (model internally handles the retraining gate)
             metrics = self.model.train(df_5m, higher_tf)
 
@@ -456,99 +463,63 @@ class SignalBot:
             # Save model
             self.model.save(self.config.model_dir)
 
-            # Notify with retraining gate status
-            swapped_str = (
-                "NEW MODEL ACTIVE"
-                if metrics["model_swapped"]
-                else "KEPT PREVIOUS MODEL (new one wasn't better)"
-            )
-            optuna_str = "Optuna-tuned" if metrics.get("optuna_tuned") else "Default params"
-
-            msg = (
-                "Model Training Complete\n\n"
-                f"Result: {swapped_str}\n\n"
-                f"Training samples: {metrics['total_samples']}\n"
-                f"Features: {metrics['n_features']}\n"
-                f"New model val accuracy: {metrics['val_accuracy']:.1%}\n"
-                f"Active model val accuracy: {metrics['active_val_accuracy']:.1%}\n"
-                f"CV accuracy: {metrics['cv_accuracy']:.1%}\n"
-                f"Val log loss: {metrics['val_logloss']:.4f}\n"
-                f"Params: {optuna_str}"
-            )
+            # Send formatted training complete message
+            msg = formatters.format_training_complete(metrics, previous_accuracy)
             await self.telegram.send_message(msg)
             logger.info("Model training complete")
 
         except Exception as e:
             logger.error(f"Training error: {e}", exc_info=True)
-            await self.telegram.send_message(f"Model training failed: {str(e)[:200]}")
+            await self.telegram.send_message(
+                formatters.format_training_failed(str(e))
+            )
 
     # --- Callback methods for Telegram commands ---
 
     def _get_stats_text(self) -> str:
-        return self.tracker.format_stats_message()
+        stats = self.tracker.get_stats()
+        return formatters.format_stats(stats)
 
     def _get_recent_text(self) -> str:
         recent = self.tracker.get_recent_signals(10)
         if not recent:
-            return "No signals recorded yet."
-
-        lines = ["---------- RECENT SIGNALS ----------"]
-        for s in recent:
-            result_str = s.result or "PENDING"
-            pnl_str = f"{s.pnl_pct:+.4f}%" if s.pnl_pct is not None else "---"
-            slot_str = ""
-            if s.candle_slot_ts:
-                try:
-                    dt = datetime.fromisoformat(s.candle_slot_ts)
-                    end_dt = dt + timedelta(minutes=CANDLE_PERIOD_MINUTES)
-                    slot_str = f" | {dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')} UTC"
-                except (ValueError, TypeError):
-                    slot_str = ""
-            lines.append(
-                f"#{s.signal_id} | {s.direction} | ${s.entry_price:,.2f} | "
-                f"{result_str} | {pnl_str} | conf={s.confidence:.1%}{slot_str}"
-            )
-        lines.append("------------------------------------")
-        return "\n".join(lines)
+            return "\U0001f4cb No signals recorded yet."
+        stats = self.tracker.get_stats()
+        return formatters.format_recent(recent, stats)
 
     async def _get_status_text(self) -> str:
         stats = self.tracker.get_stats()
-        retrain_in = "N/A"
+
+        retrain_remaining = "N/A"
         if self.model.last_train_time:
             elapsed = (datetime.now(timezone.utc) - self.model.last_train_time).total_seconds()
             remaining = max(0, self.config.model.retrain_interval_hours * 3600 - elapsed)
             hours = int(remaining // 3600)
             minutes = int((remaining % 3600) // 60)
-            retrain_in = f"{hours}h {minutes}m"
+            retrain_remaining = f"{hours}h {minutes}m"
 
-        optuna_status = "ON" if self.config.model.enable_optuna_tuning else "OFF"
-        tuned_str = "Yes" if self.model.best_xgb_params else "No (using defaults)"
-
-        now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-        return (
-            "---------- BOT STATUS (v2) ----------\n"
-            f"Status: {'RUNNING' if self._running else 'STOPPED'}\n"
-            f"Current Time: {now_utc}\n"
-            f"Symbol: {self.config.mexc.symbol}\n"
-            f"Model accuracy: {self.model.val_accuracy:.1%}\n"
-            f"Training samples: {self.model.train_samples}\n"
-            f"Last trained: {self.model.last_train_time.strftime('%Y-%m-%d %H:%M UTC') if self.model.last_train_time else 'Never'}\n"
-            f"Next retrain in: {retrain_in}\n"
-            f"Confidence threshold: {self.config.model.confidence_min:.0%}\n"
-            f"Retraining gate: {self.config.model.retrain_min_improvement:.3f}\n"
-            f"Optuna: {optuna_status} | Tuned: {tuned_str}\n"
-            f"Total signals: {stats.total_signals}\n"
-            f"Pending: {stats.pending}\n"
-            "--------------------------------------"
+        return formatters.format_status(
+            running=self._running,
+            session_start=self.tracker.session_start,
+            symbol=self.config.mexc.symbol,
+            model_accuracy=self.model.val_accuracy,
+            train_samples=self.model.train_samples,
+            last_train_time=self.model.last_train_time,
+            retrain_remaining=retrain_remaining,
+            confidence_min=self.config.model.confidence_min,
+            retrain_gate=self.config.model.retrain_min_improvement,
+            optuna_enabled=self.config.model.enable_optuna_tuning,
+            optuna_tuned=self.model.best_xgb_params is not None,
+            total_signals=stats.total_signals,
+            pending=stats.pending,
         )
 
     async def _retrain_model(self) -> str:
         try:
             await self._train_model()
-            return f"Retrain complete! Active model val accuracy: {self.model.val_accuracy:.1%}"
+            return formatters.format_retrain_complete(self.model.val_accuracy)
         except Exception as e:
-            return f"Retrain failed: {str(e)[:200]}"
+            return formatters.format_retrain_failed(str(e))
 
 
 async def run_bot():

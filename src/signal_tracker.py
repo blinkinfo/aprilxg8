@@ -1,6 +1,10 @@
 """Signal tracking with win/loss, PnL, streaks, and statistics.
 
 Fixed: candle slot timestamps, open/close resolution, UTC time throughout.
+
+UI/UX v2:
+- format_signal_message, format_resolution_message, format_stats_message
+  moved to formatters.py. This module is now pure data/logic.
 """
 import json
 import logging
@@ -12,37 +16,13 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-def _format_slot(iso_ts: str) -> str:
-    """Format an ISO timestamp into a readable UTC slot string.
-
-    E.g. '2026-03-19T09:00:00+00:00' -> '09:00-09:05 UTC'
-    """
-    try:
-        dt = datetime.fromisoformat(iso_ts)
-        end = dt.replace(minute=dt.minute + 5) if dt.minute + 5 < 60 else dt.replace(
-            hour=dt.hour + 1, minute=(dt.minute + 5) % 60
-        )
-        return f"{dt.strftime('%H:%M')}-{end.strftime('%H:%M')} UTC"
-    except Exception:
-        return iso_ts[:19] + "Z"
-
-
-def _format_utc(iso_ts: str) -> str:
-    """Format an ISO timestamp to a short UTC string like '09:04:45 UTC'."""
-    try:
-        dt = datetime.fromisoformat(iso_ts)
-        return dt.strftime("%H:%M:%S UTC")
-    except Exception:
-        return iso_ts[:19] + "Z"
-
-
 @dataclass
 class Signal:
     """A single signal record."""
     signal_id: int
     direction: str  # UP or DOWN
     confidence: float
-    entry_price: float  # Candle OPEN price (for Polymarket accuracy)
+    entry_price: float  # Current live price at signal time (kept for display)
     timestamp: str  # When the signal was created (ISO UTC)
     candle_slot_ts: str = ""  # Candle open timestamp in ISO UTC (e.g. 09:00:00)
     candle_open_price: float = 0.0  # The candle's actual open price
@@ -87,6 +67,11 @@ class SignalTracker:
         self._next_id = 1
         self._session_start = datetime.now(timezone.utc).isoformat()
         self._load()
+
+    @property
+    def session_start(self) -> str:
+        """Expose session start for status display."""
+        return self._session_start
 
     def add_signal(
         self,
@@ -296,108 +281,6 @@ class SignalTracker:
     def get_recent_signals(self, n: int = 10) -> list[Signal]:
         """Get the N most recent signals."""
         return self.signals[-n:]
-
-    def format_stats_message(self) -> str:
-        """Format stats as a Telegram-friendly message."""
-        s = self.get_stats()
-
-        if s.total_signals == 0:
-            return "No signals recorded yet."
-
-        streak_emoji = ""
-        if s.current_streak_type == "WIN" and s.current_streak >= 2:
-            streak_emoji = " [HOT]"
-        elif s.current_streak_type == "LOSS" and s.current_streak >= 3:
-            streak_emoji = " [COLD]"
-
-        lines = [
-            "========== SIGNAL TRACKER ==========",
-            "",
-            f"Total Signals: {s.total_signals}",
-            f"Resolved: {s.wins + s.losses + s.neutral} | Pending: {s.pending}",
-            "",
-            "---------- Performance ----------",
-            f"Wins: {s.wins} | Losses: {s.losses} | Neutral: {s.neutral}",
-            f"Win Rate: {s.win_rate:.1f}%",
-            "",
-            "---------- PnL ----------",
-            f"Total PnL: {s.total_pnl_pct:+.4f}%",
-            f"Avg PnL/Trade: {s.avg_pnl_pct:+.4f}%",
-            f"Avg Win: {s.avg_win_pct:+.4f}% | Avg Loss: {s.avg_loss_pct:+.4f}%",
-            f"Best: {s.best_trade_pct:+.4f}% | Worst: {s.worst_trade_pct:+.4f}%",
-            "",
-            "---------- Streaks ----------",
-            f"Current: {s.current_streak} {s.current_streak_type}{streak_emoji}",
-            f"Longest Win Streak: {s.longest_win_streak}",
-            f"Longest Loss Streak: {s.longest_loss_streak}",
-            "",
-            "---------- Meta ----------",
-            f"Avg Confidence: {s.avg_confidence:.4f}",
-            f"Session Start: {_format_utc(s.session_start)}",
-        ]
-        if s.last_signal_time:
-            lines.append(f"Last Signal: {_format_utc(s.last_signal_time)}")
-        lines.append("====================================")
-        return "\n".join(lines)
-
-    def format_signal_message(self, signal: Signal, prediction: dict) -> str:
-        """Format a new signal as a Telegram message.
-
-        At signal time the candle has not opened yet, so we show
-        'Prediction for:' and omit the unknown candle open price.
-        """
-        direction_arrow = ">> UP" if signal.direction == "UP" else ">> DOWN"
-        strength = prediction.get("strength", "NORMAL")
-        strength_label = f" [{strength}]" if strength == "STRONG" else ""
-
-        slot_str = _format_slot(signal.candle_slot_ts) if signal.candle_slot_ts else "N/A"
-        sent_at_str = _format_utc(signal.timestamp)
-
-        lines = [
-            "========== BTC 5m SIGNAL ==========",
-            "",
-            f"Prediction for: {slot_str}",
-            f"Direction: {direction_arrow}{strength_label}",
-            f"Confidence: {signal.confidence:.1%}",
-            "",
-            f"Current Price: ${signal.entry_price:,.2f}",
-            f"P(Up): {prediction.get('prob_up', 0):.1%} | P(Down): {prediction.get('prob_down', 0):.1%}",
-            "",
-            f"Model Accuracy: {prediction.get('model_accuracy', 0):.1%}",
-            f"Signal #{signal.signal_id} | Sent: {sent_at_str}",
-            "====================================",
-        ]
-        return "\n".join(lines)
-
-    def format_resolution_message(self, signal: Signal) -> str:
-        """Format a signal resolution as a Telegram message."""
-        result_label = signal.result
-        if signal.result == "WIN":
-            result_label = "[WIN]"
-        elif signal.result == "LOSS":
-            result_label = "[LOSS]"
-
-        stats = self.get_stats()
-        slot_str = _format_slot(signal.candle_slot_ts) if signal.candle_slot_ts else "N/A"
-        resolved_at_str = _format_utc(signal.resolved_at) if signal.resolved_at else "N/A"
-
-        lines = [
-            "---------- SIGNAL RESOLVED ----------",
-            "",
-            f"Candle: {slot_str}",
-            f"Signal #{signal.signal_id}: {signal.direction}",
-            f"Result: {result_label}",
-            "",
-            f"Candle Open:  ${signal.candle_open_price:,.2f}",
-            f"Candle Close: ${signal.exit_price:,.2f}",
-            f"PnL: {signal.pnl_pct:+.4f}%",
-            "",
-            f"Running W/L: {stats.wins}/{stats.losses} ({stats.win_rate:.1f}%)",
-            f"Total PnL: {stats.total_pnl_pct:+.4f}%",
-            f"Resolved: {resolved_at_str}",
-            "--------------------------------------",
-        ]
-        return "\n".join(lines)
 
     def _find_signal(self, signal_id: int) -> Optional[Signal]:
         for s in self.signals:

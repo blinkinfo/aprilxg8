@@ -4,6 +4,11 @@ Fixes applied:
 - Graceful handling of telegram.error.Conflict when another bot instance
   is still polling (common during Railway redeploys). Retries with backoff
   so the new container survives instead of crashing.
+
+UI/UX v2:
+- All messages use HTML parse_mode for rich formatting
+- Message formatting delegated to formatters module
+- Commands return formatted responses via callbacks
 """
 import asyncio
 import logging
@@ -18,6 +23,7 @@ from telegram.ext import (
 )
 
 from .config import TelegramConfig
+from . import formatters
 
 logger = logging.getLogger(__name__)
 
@@ -136,10 +142,10 @@ class TelegramBot:
                 logger.warning(f"Error during Telegram bot shutdown: {e}")
 
     async def send_message(self, text: str, chat_id: Optional[str] = None) -> bool:
-        """Send a message to the configured chat.
+        """Send an HTML-formatted message to the configured chat.
 
         Args:
-            text: Message text
+            text: Message text (HTML formatted)
             chat_id: Override chat ID (uses config default if None)
 
         Returns:
@@ -157,7 +163,7 @@ class TelegramBot:
                 await self.bot.send_message(
                     chat_id=target_chat,
                     text=msg,
-                    parse_mode=None,  # Plain text for reliability
+                    parse_mode="HTML",
                 )
                 if len(messages) > 1:
                     await asyncio.sleep(0.5)
@@ -189,57 +195,41 @@ class TelegramBot:
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
-        await update.message.reply_text(
-            f"BTC 5m Signal Bot active!\n\n"
-            f"Your Chat ID: {chat_id}\n\n"
-            f"Commands:\n"
-            f"/stats - View signal performance\n"
-            f"/recent - Recent signals\n"
-            f"/status - Bot status\n"
-            f"/retrain - Force model retrain\n"
-            f"/help - Show this help"
-        )
+        msg = formatters.format_start(chat_id)
+        await update.message.reply_text(msg, parse_mode="HTML")
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(
-            "BTC 5-Minute Signal Bot\n"
-            "========================\n\n"
-            "This bot predicts the direction of the next BTC 5-minute candle "
-            "using an XGBoost ML model with multi-timeframe features.\n\n"
-            "Commands:\n"
-            "/stats - Full performance stats (W/L, PnL, streaks)\n"
-            "/recent - Last 10 signals with results\n"
-            "/status - Model & bot status\n"
-            "/retrain - Force model retraining\n"
-            "/start - Show welcome & chat ID\n"
-            "/help - This help message"
-        )
+        msg = formatters.format_help()
+        await update.message.reply_text(msg, parse_mode="HTML")
 
     async def _cmd_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if self._stats_callback:
             text = self._stats_callback()
         else:
-            text = "Stats not available yet."
-        await update.message.reply_text(text)
+            text = "\U0001f4ca Stats not available yet."
+        await update.message.reply_text(text, parse_mode="HTML")
 
     async def _cmd_recent(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if self._recent_callback:
             text = self._recent_callback()
         else:
-            text = "No recent signals."
-        await update.message.reply_text(text)
+            text = "\U0001f4cb No recent signals."
+        await update.message.reply_text(text, parse_mode="HTML")
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if self._status_callback:
             text = await self._status_callback()
         else:
-            text = "Status not available."
-        await update.message.reply_text(text)
+            text = "\u2699\ufe0f Status not available."
+        await update.message.reply_text(text, parse_mode="HTML")
 
     async def _cmd_retrain(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("Starting model retrain...")
+        await update.message.reply_text(
+            formatters.format_retrain_started(),
+            parse_mode="HTML",
+        )
         if self._retrain_callback:
             text = await self._retrain_callback()
         else:
-            text = "Retrain not available."
-        await update.message.reply_text(text)
+            text = "\U0001f504 Retrain not available."
+        await update.message.reply_text(text, parse_mode="HTML")
