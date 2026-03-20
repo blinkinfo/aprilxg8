@@ -3,7 +3,7 @@
 Handles:
 - Authentication via private key + derived API credentials
 - Market discovery via Gamma API slug-based lookup (deterministic)
-- Order placement (limit buy) on the correct Up/Down token
+- Order placement (FOK market buy) on the correct Up/Down token
 - Balance fetching, open positions, connection health checks
 - Duplicate trade prevention per slot
 
@@ -23,10 +23,16 @@ Slot-Targeted Trading:
     passed explicitly through the entire trade pipeline to ensure the order
     lands on the correct Polymarket market.
 
-Order Sizing:
-    OrderArgs.size = number of outcome shares (NOT USDC notional).
-    To spend $5 USDC at price $0.50/share: size = 5.0 / 0.50 = 10.0 shares.
-    The USDC cost is: price * size = 0.50 * 10.0 = $5.00.
+Order Execution (FOK Market Orders):
+    Uses MarketOrderArgs with OrderType.FOK (Fill-or-Kill) for immediate
+    execution at best available market price.
+
+    For BUY orders: amount = USDC to spend (e.g. 1.0 = $1 USDC).
+    The SDK auto-calculates the optimal price from the order book and
+    determines the share quantity internally.
+
+    FOK orders either fill entirely and immediately, or are rejected.
+    No partial fills, no resting orders on the book.
 
 Requires:
     py-clob-client >= 0.34.6
@@ -467,13 +473,14 @@ class PolymarketClient:
             return {"success": False, "data": None, "error": str(e)}
 
     # ------------------------------------------------------------------
-    # Order Book / Pricing
+    # Order Book / Pricing (used for logging/display only)
     # ------------------------------------------------------------------
 
     def get_best_price(self, token_id: str, side: str = "BUY") -> Optional[float]:
         """Get the best available price from the CLOB order book.
 
-        Uses ClobClient.get_price() which is the correct SDK method.
+        Used for logging and display purposes. FOK market orders handle
+        pricing automatically via the SDK.
 
         Args:
             token_id: The CLOB token ID
@@ -493,7 +500,7 @@ class PolymarketClient:
             return None
 
     # ------------------------------------------------------------------
-    # Trade Execution
+    # Trade Execution (FOK Market Orders)
     # ------------------------------------------------------------------
 
     async def place_trade(
@@ -502,7 +509,18 @@ class PolymarketClient:
         amount: float,
         target_slot_ts: Optional[int] = None,
     ) -> dict:
-        """Place a limit buy order on the correct Up/Down token.
+        """Place a FOK (Fill-or-Kill) market buy order on the correct Up/Down token.
+
+        Uses MarketOrderArgs with OrderType.FOK for immediate execution at
+        the best available market price. The SDK handles:
+        - Price calculation from the order book
+        - Tick size resolution
+        - Neg risk detection
+        - Fee rate resolution
+        - Order signing
+
+        For BUY orders, amount = USDC to spend (e.g. 1.0 = $1.00 USDC).
+        The order either fills entirely and immediately, or is rejected.
 
         When target_slot_ts is provided (the expected path for signal-driven
         trades), the order is placed on that EXACT slot's market. This prevents
@@ -511,12 +529,6 @@ class PolymarketClient:
 
         When target_slot_ts is None (legacy fallback), falls back to
         get_current_market() which guesses based on what's currently open.
-
-        Order sizing:
-            OrderArgs.size = number of outcome shares.
-            size = usdc_amount / price_per_share
-            Example: $5 USDC at $0.50/share -> size = 10.0 shares
-            Actual USDC spent = price * size = $0.50 * 10.0 = $5.00
 
         Args:
             direction: "UP" or "DOWN"
@@ -537,7 +549,7 @@ class PolymarketClient:
 
         try:
             from py_clob_client.clob_types import (
-                OrderArgs,
+                MarketOrderArgs,
                 OrderType,
                 PartialCreateOrderOptions,
             )
@@ -601,95 +613,89 @@ class PolymarketClient:
                     "error": f"No token ID found for direction={direction}",
                 }
 
-            # Step 5: Get best available price from CLOB order book
-            best_price = self.get_best_price(token_id, side="BUY")
-            if best_price is None or best_price <= 0:
-                # Fall back to Gamma API price (from market discovery)
-                if gamma_price and gamma_price > 0:
-                    best_price = gamma_price
-                    logger.warning(
-                        f"No CLOB price available, using Gamma price: {best_price}"
-                    )
-                else:
-                    # Last resort: 0.50 for a binary market
-                    best_price = 0.50
-                    logger.warning(
-                        f"No price available anywhere, using default: {best_price}"
-                    )
+            # Step 5: Get display price for logging (not used for order)
+            display_price = self.get_best_price(token_id, side="BUY")
+            if display_price is None:
+                display_price = gamma_price if gamma_price and gamma_price > 0 else 0.50
 
-            # Step 6: Calculate size (number of outcome shares)
-            # size = USDC amount / price per share
-            # This means we spend: price * size = price * (amount/price) = amount USDC
-            size = round(amount / best_price, 2)
-
-            if size <= 0:
-                return {
-                    "success": False,
-                    "data": None,
-                    "error": f"Invalid order size: {size} (amount={amount}, price={best_price})",
-                }
-
-            # Step 7: Build and place the order
             neg_risk = market.get("neg_risk", False)
 
             logger.info(
-                f"Placing {direction} order: "
+                f"Placing FOK market {direction} order: "
                 f"token={token_id[:16]}... | "
-                f"price={best_price} | "
-                f"size={size} shares | "
-                f"cost={best_price * size:.2f} USDC | "
+                f"amount={amount} USDC | "
+                f"display_price={display_price} | "
                 f"slot={market['market_slug']} | "
                 f"neg_risk={neg_risk}"
             )
 
-            order_args = OrderArgs(
+            # Step 6: Build FOK market order
+            # MarketOrderArgs.amount = USDC to spend for BUY orders.
+            # price=0 tells the SDK to auto-calculate the optimal price
+            # from the order book via calculate_market_price().
+            market_order_args = MarketOrderArgs(
                 token_id=token_id,
-                price=best_price,
-                size=size,
+                amount=amount,
                 side=BUY,
+                price=0,  # SDK auto-calculates from order book
+                order_type=OrderType.FOK,
             )
 
             options = PartialCreateOrderOptions(
                 neg_risk=neg_risk,
             )
 
-            order_resp = self._client.create_and_post_order(order_args, options)
+            # Step 7: Sign the order locally
+            signed_order = self._client.create_market_order(
+                market_order_args, options
+            )
+
+            # Step 8: Post the signed order with FOK type
+            order_resp = self._client.post_order(
+                signed_order, orderType=OrderType.FOK
+            )
 
             # Mark slot as traded
             self._last_traded_slot = slot_ts
 
             # Parse order response
             order_id = "unknown"
-            status = "PLACED"
+            status = "MATCHED"
             if isinstance(order_resp, dict):
                 order_id = order_resp.get("orderID", order_resp.get("id", "unknown"))
-                status = order_resp.get("status", "PLACED")
+                status = order_resp.get("status", "MATCHED")
             elif hasattr(order_resp, "orderID"):
                 order_id = order_resp.orderID
             elif hasattr(order_resp, "id"):
                 order_id = order_resp.id
 
+            # Calculate effective size for display
+            # For FOK market buys, size ≈ amount / price
+            effective_price = display_price if display_price > 0 else 0.50
+            effective_size = round(amount / effective_price, 2)
+
             trade_data = {
                 "order_id": str(order_id),
                 "direction": direction,
-                "amount": round(best_price * size, 2),  # Actual USDC cost
-                "price": best_price,
-                "size": size,
+                "amount": round(amount, 2),  # USDC spent
+                "price": effective_price,
+                "size": effective_size,
                 "token_id": token_id,
                 "slot_ts": slot_ts,
                 "slot_dt": market["slot_dt"],
                 "question": market["question"],
                 "market_slug": market["market_slug"],
                 "status": status,
+                "order_type": "FOK",
                 "filled_at": datetime.now(timezone.utc).isoformat(),
             }
 
             logger.info(
-                f"Trade placed: {direction} | "
+                f"FOK trade placed: {direction} | "
                 f"order={order_id} | "
-                f"price={best_price} | "
-                f"size={size} shares | "
-                f"cost={best_price * size:.2f} USDC | "
+                f"amount={amount} USDC | "
+                f"~price={effective_price} | "
+                f"~size={effective_size} shares | "
                 f"slot={market['market_slug']}"
             )
             return {"success": True, "data": trade_data, "error": None}
