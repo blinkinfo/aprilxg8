@@ -203,7 +203,7 @@ class AutoTrader:
             }
 
         # --- Safety Check 4: Duplicate slot prevention ---
-        current_slot = PolymarketClient.get_next_slot_timestamp()
+        current_slot = PolymarketClient.get_current_slot_timestamp()
         if self._last_traded_slot == current_slot:
             return {
                 "success": False,

@@ -2,10 +2,24 @@
 
 Handles:
 - Authentication via private key + derived API credentials
-- Market discovery via Gamma API for the next 5-min BTC slot
-- Order placement (market buy) on the correct Up/Down token
+- Market discovery via Gamma API slug-based lookup (deterministic)
+- Order placement (limit buy) on the correct Up/Down token
 - Balance fetching, open positions, connection health checks
 - Duplicate trade prevention per slot
+
+Market Discovery Strategy:
+    BTC 5-min Up/Down markets follow a deterministic slug pattern:
+        btc-updown-5m-{slot_timestamp}
+    where slot_timestamp = (unix_time // 300) * 300 (current 5-min boundary).
+
+    We look up the market directly by slug via:
+        GET https://gamma-api.polymarket.com/markets?slug=btc-updown-5m-{ts}
+    This is 100% reliable — no keyword searching needed.
+
+Order Sizing:
+    OrderArgs.size = number of outcome shares (NOT USDC notional).
+    To spend $5 USDC at price $0.50/share: size = 5.0 / 0.50 = 10.0 shares.
+    The USDC cost is: price * size = 0.50 * 10.0 = $5.00.
 
 Requires:
     py-clob-client >= 0.34.6
@@ -135,14 +149,25 @@ class PolymarketClient:
             return {"success": False, "data": None, "error": str(e)}
 
     # ------------------------------------------------------------------
-    # Market Discovery
+    # Market Discovery (Deterministic Slug-Based)
     # ------------------------------------------------------------------
 
     @staticmethod
-    def get_next_slot_timestamp() -> int:
-        """Compute the Unix timestamp of the next 5-min slot opening.
+    def get_current_slot_timestamp() -> int:
+        """Get the Unix timestamp of the CURRENT 5-min slot (floor to 300s).
 
-        E.g. if now is 09:03:22 -> next slot opens at 09:05:00 -> returns 09:05:00 as Unix ts.
+        Example: if now is 09:03:22 -> current slot is 09:00:00.
+        This is the slot that is currently OPEN and accepting trades.
+        """
+        now_ts = int(time.time())
+        return now_ts - (now_ts % SLOT_PERIOD)
+
+    @staticmethod
+    def get_next_slot_timestamp() -> int:
+        """Get the Unix timestamp of the NEXT 5-min slot.
+
+        Example: if now is 09:03:22 -> next slot is 09:05:00.
+        This market already exists on Polymarket but hasn't started yet.
         """
         now_ts = int(time.time())
         return now_ts - (now_ts % SLOT_PERIOD) + SLOT_PERIOD
@@ -152,150 +177,197 @@ class PolymarketClient:
         """Convert a Unix slot timestamp to a UTC datetime."""
         return datetime.fromtimestamp(slot_ts, tz=timezone.utc)
 
-    async def get_current_market(self) -> dict:
-        """Find the active Polymarket 5-min BTC Up/Down market for the next slot.
+    @staticmethod
+    def _build_slug(slot_ts: int) -> str:
+        """Build the deterministic Gamma API slug for a BTC 5-min market.
 
-        Searches Gamma API for the upcoming BTC 5-min binary market.
+        Format: btc-updown-5m-{slot_timestamp}
+        """
+        return f"btc-updown-5m-{slot_ts}"
+
+    async def _fetch_market_by_slug(self, slug: str) -> Optional[dict]:
+        """Fetch a single market from Gamma API by its slug.
+
+        Args:
+            slug: Market slug e.g. 'btc-updown-5m-1774025100'
+
+        Returns:
+            Market dict from Gamma API, or None if not found.
+        """
+        try:
+            resp = await self._http.get(
+                f"{GAMMA_API}/markets",
+                params={"slug": slug},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            if isinstance(data, list) and len(data) > 0:
+                return data[0]
+            elif isinstance(data, dict) and data.get("slug"):
+                return data
+            return None
+
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"Gamma API HTTP {e.response.status_code} for slug={slug}")
+            return None
+        except Exception as e:
+            logger.warning(f"Gamma API error for slug={slug}: {e}")
+            return None
+
+    def _parse_market(self, market: dict, slot_ts: int) -> dict:
+        """Parse a Gamma API market response into our internal format.
+
+        Extracts condition_id, token IDs for Up/Down, outcome prices, etc.
+        Maps outcomes to token IDs by matching outcome labels ("Up"/"Down").
+
+        Args:
+            market: Raw market dict from Gamma API.
+            slot_ts: The slot timestamp this market belongs to.
+
+        Returns:
+            Parsed market data dict.
+        """
+        condition_id = market.get("conditionId", "")
+
+        # clobTokenIds is a JSON string: '["id1", "id2"]'
+        clob_raw = market.get("clobTokenIds", "[]")
+        if isinstance(clob_raw, str):
+            clob_token_ids = json.loads(clob_raw)
+        else:
+            clob_token_ids = clob_raw
+
+        # outcomes is a JSON string: '["Up", "Down"]'
+        outcomes_raw = market.get("outcomes", "[]")
+        if isinstance(outcomes_raw, str):
+            outcomes = json.loads(outcomes_raw)
+        else:
+            outcomes = outcomes_raw
+
+        # outcomePrices is a JSON string: '["0.515", "0.485"]'
+        prices_raw = market.get("outcomePrices", "[]")
+        if isinstance(prices_raw, str):
+            prices = json.loads(prices_raw)
+        else:
+            prices = prices_raw
+
+        # Map outcomes to token IDs by label
+        # Polymarket BTC 5-min markets use ["Up", "Down"] consistently
+        up_token_id = None
+        down_token_id = None
+        up_price = None
+        down_price = None
+
+        for i, outcome in enumerate(outcomes):
+            label = outcome.strip().lower()
+            if i < len(clob_token_ids):
+                if label in ("up", "yes"):
+                    up_token_id = clob_token_ids[i]
+                    if i < len(prices):
+                        up_price = float(prices[i])
+                elif label in ("down", "no"):
+                    down_token_id = clob_token_ids[i]
+                    if i < len(prices):
+                        down_price = float(prices[i])
+
+        # Safety: if labels didn't match (shouldn't happen), refuse to guess
+        if up_token_id is None or down_token_id is None:
+            logger.error(
+                f"Could not map outcomes to tokens! "
+                f"outcomes={outcomes}, tokens={clob_token_ids}"
+            )
+            return None
+
+        slot_dt = self.slot_to_datetime(slot_ts)
+        neg_risk = market.get("negRisk", False)
+
+        return {
+            "condition_id": condition_id,
+            "up_token_id": up_token_id,
+            "down_token_id": down_token_id,
+            "up_price": up_price,
+            "down_price": down_price,
+            "slot_ts": slot_ts,
+            "slot_dt": slot_dt.isoformat(),
+            "question": market.get("question", "N/A"),
+            "outcomes": outcomes,
+            "prices": [float(p) for p in prices] if prices else [],
+            "market_slug": market.get("slug", ""),
+            "enable_order_book": market.get("enableOrderBook", False),
+            "neg_risk": neg_risk,
+            "active": market.get("active", False),
+            "closed": market.get("closed", False),
+            "end_date": market.get("end_date_iso", market.get("endDate", market.get("end_date", ""))),
+        }
+
+    async def get_current_market(self) -> dict:
+        """Find the active Polymarket 5-min BTC Up/Down market to trade on.
+
+        Strategy:
+            1. Try the CURRENT slot (floor to 300s) — this is the open, tradeable market.
+            2. If current slot market is closed/not found, try the NEXT slot.
+            3. Look up by deterministic slug: btc-updown-5m-{slot_ts}
 
         Returns:
             {success: bool, data: {condition_id, up_token_id, down_token_id,
-             slot_ts, slot_dt, question, outcomes, prices, neg_risk}, error: str|None}
+             up_price, down_price, slot_ts, slot_dt, question, outcomes,
+             prices, neg_risk, ...}, error: str|None}
         """
         if not self._initialized:
             return {"success": False, "data": None, "error": "Client not initialized"}
 
         try:
-            # Search for active BTC 5-min up/down markets
-            resp = await self._http.get(
-                f"{GAMMA_API}/markets",
-                params={
-                    "closed": "false",
-                    "active": "true",
-                    "limit": 20,
-                    "order": "volume_24hr",
-                    "ascending": "false",
-                },
-            )
-            resp.raise_for_status()
-            markets = resp.json()
+            current_slot = self.get_current_slot_timestamp()
+            next_slot = self.get_next_slot_timestamp()
 
-            # Find the BTC 5-min up/down market
-            target_market = None
-            for market in markets:
-                question = (market.get("question") or "").lower()
-                # Match patterns like "BTC 5 min", "Bitcoin 5-minute", "BTC up or down"
-                if ("btc" in question or "bitcoin" in question) and \
-                   ("5 min" in question or "5-min" in question or "5min" in question) and \
-                   ("up" in question and "down" in question):
-                    target_market = market
-                    break
+            # Try current slot first (the one currently open for trading)
+            for slot_ts in [current_slot, next_slot]:
+                slug = self._build_slug(slot_ts)
+                logger.info(f"Looking up market: {slug}")
 
-            # Fallback: search via public-search endpoint
-            if target_market is None:
-                resp2 = await self._http.get(
-                    f"{GAMMA_API}/public-search",
-                    params={"query": "BTC 5 min up down", "limit": 10},
+                market_raw = await self._fetch_market_by_slug(slug)
+                if market_raw is None:
+                    logger.info(f"No market found for slug={slug}, trying next...")
+                    continue
+
+                # Check if market is actually tradeable
+                is_closed = market_raw.get("closed", False)
+                is_active = market_raw.get("active", True)
+                enable_ob = market_raw.get("enableOrderBook", True)
+
+                if is_closed:
+                    logger.info(f"Market {slug} is closed, trying next...")
+                    continue
+
+                if not is_active:
+                    logger.info(f"Market {slug} is not active, trying next...")
+                    continue
+
+                # Parse market data
+                parsed = self._parse_market(market_raw, slot_ts)
+                if parsed is None:
+                    logger.error(f"Failed to parse market {slug}")
+                    continue
+
+                logger.info(
+                    f"Market found: {parsed['question']} | "
+                    f"slug={slug} | "
+                    f"Up={parsed['up_token_id'][:16]}... (${parsed['up_price']}) | "
+                    f"Down={parsed['down_token_id'][:16]}... (${parsed['down_price']})"
                 )
-                resp2.raise_for_status()
-                search_results = resp2.json()
+                return {"success": True, "data": parsed, "error": None}
 
-                for item in search_results:
-                    if "markets" in item:
-                        for m in item["markets"]:
-                            q = (m.get("question") or "").lower()
-                            if ("btc" in q or "bitcoin" in q) and \
-                               ("5 min" in q or "5-min" in q or "5min" in q) and \
-                               ("up" in q and "down" in q) and \
-                               not m.get("closed", True):
-                                target_market = m
-                                break
-                    else:
-                        q = (item.get("question") or "").lower()
-                        if ("btc" in q or "bitcoin" in q) and \
-                           ("5 min" in q or "5-min" in q or "5min" in q) and \
-                           ("up" in q and "down" in q) and \
-                           not item.get("closed", True):
-                            target_market = item
-                            break
-                    if target_market:
-                        break
-
-            if target_market is None:
-                return {
-                    "success": False,
-                    "data": None,
-                    "error": "BTC 5-min Up/Down market not found on Polymarket",
-                }
-
-            # Parse market data
-            condition_id = target_market.get("conditionId", "")
-
-            # clobTokenIds is a JSON string array: '["id1", "id2"]'
-            clob_token_ids_raw = target_market.get("clobTokenIds", "[]")
-            if isinstance(clob_token_ids_raw, str):
-                clob_token_ids = json.loads(clob_token_ids_raw)
-            else:
-                clob_token_ids = clob_token_ids_raw
-
-            # outcomes is a JSON string array: '["Up", "Down"]'
-            outcomes_raw = target_market.get("outcomes", "[]")
-            if isinstance(outcomes_raw, str):
-                outcomes = json.loads(outcomes_raw)
-            else:
-                outcomes = outcomes_raw
-
-            # outcomePrices is a JSON string array: '["0.50", "0.50"]'
-            prices_raw = target_market.get("outcomePrices", "[]")
-            if isinstance(prices_raw, str):
-                prices = json.loads(prices_raw)
-            else:
-                prices = prices_raw
-
-            # Map outcomes to token IDs
-            up_token_id = None
-            down_token_id = None
-            for i, outcome in enumerate(outcomes):
-                outcome_lower = outcome.lower().strip()
-                if outcome_lower in ("up", "yes") and i < len(clob_token_ids):
-                    up_token_id = clob_token_ids[i]
-                elif outcome_lower in ("down", "no") and i < len(clob_token_ids):
-                    down_token_id = clob_token_ids[i]
-
-            # Fallback: if outcomes are just ["Yes", "No"] or similar
-            if up_token_id is None and len(clob_token_ids) >= 1:
-                up_token_id = clob_token_ids[0]
-            if down_token_id is None and len(clob_token_ids) >= 2:
-                down_token_id = clob_token_ids[1]
-
-            next_slot_ts = self.get_next_slot_timestamp()
-            slot_dt = self.slot_to_datetime(next_slot_ts)
-
-            # Get neg_risk from market data (needed for order signing)
-            neg_risk = target_market.get("negRisk", False)
-
-            market_data = {
-                "condition_id": condition_id,
-                "up_token_id": up_token_id,
-                "down_token_id": down_token_id,
-                "slot_ts": next_slot_ts,
-                "slot_dt": slot_dt.isoformat(),
-                "question": target_market.get("question", "N/A"),
-                "outcomes": outcomes,
-                "prices": [float(p) for p in prices] if prices else [],
-                "market_slug": target_market.get("slug", ""),
-                "enable_order_book": target_market.get("enableOrderBook", False),
-                "neg_risk": neg_risk,
+            # Both slots failed
+            return {
+                "success": False,
+                "data": None,
+                "error": (
+                    f"No tradeable BTC 5-min market found. "
+                    f"Tried slugs: {self._build_slug(current_slot)}, "
+                    f"{self._build_slug(next_slot)}"
+                ),
             }
 
-            logger.info(
-                f"Market found: {market_data['question']} | "
-                f"Up={up_token_id[:12]}... Down={down_token_id[:12]}..."
-            )
-            return {"success": True, "data": market_data, "error": None}
-
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Gamma API HTTP error: {e.response.status_code}")
-            return {"success": False, "data": None, "error": f"Gamma API error: {e.response.status_code}"}
         except Exception as e:
             logger.error(f"Market discovery failed: {e}", exc_info=True)
             return {"success": False, "data": None, "error": str(e)}
@@ -323,7 +395,7 @@ class PolymarketClient:
                 return float(price)
             return None
         except Exception as e:
-            logger.error(f"Price fetch failed: {e}")
+            logger.error(f"Price fetch failed for token={token_id[:16]}...: {e}")
             return None
 
     # ------------------------------------------------------------------
@@ -331,12 +403,13 @@ class PolymarketClient:
     # ------------------------------------------------------------------
 
     async def place_trade(self, direction: str, amount: float) -> dict:
-        """Place a market buy order on the correct Up/Down token.
+        """Place a limit buy order on the correct Up/Down token.
 
-        Uses the correct py-clob-client API:
-        - OrderArgs for order parameters
-        - PartialCreateOrderOptions for neg_risk
-        - create_and_post_order() convenience method
+        Order sizing:
+            OrderArgs.size = number of outcome shares.
+            size = usdc_amount / price_per_share
+            Example: $5 USDC at $0.50/share -> size = 10.0 shares
+            Actual USDC spent = price * size = $0.50 * 10.0 = $5.00
 
         Args:
             direction: "UP" or "DOWN"
@@ -344,7 +417,7 @@ class PolymarketClient:
 
         Returns:
             {success: bool, data: {order_id, direction, amount, price,
-             token_id, slot_ts, slot_dt, question, filled_at}, error: str|None}
+             size, token_id, slot_ts, slot_dt, question, filled_at}, error: str|None}
         """
         if not self._initialized:
             return {"success": False, "data": None, "error": "Client not initialized"}
@@ -360,7 +433,7 @@ class PolymarketClient:
             )
             from py_clob_client.order_builder.constants import BUY
 
-            # Step 1: Discover the current market
+            # Step 1: Discover the current market via deterministic slug
             market_result = await self.get_current_market()
             if not market_result["success"]:
                 return {
@@ -380,42 +453,59 @@ class PolymarketClient:
                     "error": f"Duplicate trade prevented: already traded slot {market['slot_dt']}",
                 }
 
-            # Step 3: Pick the correct token
+            # Step 3: Pick the correct token based on signal direction
             if direction == "UP":
                 token_id = market["up_token_id"]
+                gamma_price = market["up_price"]
             else:
                 token_id = market["down_token_id"]
+                gamma_price = market["down_price"]
 
             if not token_id:
                 return {
                     "success": False,
                     "data": None,
-                    "error": f"No token ID found for {direction}",
+                    "error": f"No token ID found for direction={direction}",
                 }
 
-            # Step 4: Get best available price from order book
+            # Step 4: Get best available price from CLOB order book
             best_price = self.get_best_price(token_id, side="BUY")
-            if best_price is None:
-                # Use 0.50 as a reasonable default for binary markets
-                best_price = 0.50
-                logger.warning(f"No asks in order book, using default price {best_price}")
+            if best_price is None or best_price <= 0:
+                # Fall back to Gamma API price (from market discovery)
+                if gamma_price and gamma_price > 0:
+                    best_price = gamma_price
+                    logger.warning(
+                        f"No CLOB price available, using Gamma price: {best_price}"
+                    )
+                else:
+                    # Last resort: 0.50 for a binary market
+                    best_price = 0.50
+                    logger.warning(
+                        f"No price available anywhere, using default: {best_price}"
+                    )
 
-            # Step 5: Calculate size (number of outcome tokens)
-            # size = USDC amount / price per token
+            # Step 5: Calculate size (number of outcome shares)
+            # size = USDC amount / price per share
+            # This means we spend: price * size = price * (amount/price) = amount USDC
             size = round(amount / best_price, 2)
 
-            # Step 6: Get neg_risk for proper order signing
-            neg_risk = market.get("neg_risk", False)
-            # Also try to get from CLOB directly as fallback
-            try:
-                neg_risk = self._client.get_neg_risk(token_id)
-            except Exception:
-                pass  # Use the value from Gamma API
+            if size <= 0:
+                return {
+                    "success": False,
+                    "data": None,
+                    "error": f"Invalid order size: {size} (amount={amount}, price={best_price})",
+                }
 
-            # Step 7: Place the order using correct API
+            # Step 6: Build and place the order
+            neg_risk = market.get("neg_risk", False)
+
             logger.info(
-                f"Placing {direction} order: token={token_id[:16]}..., "
-                f"price={best_price}, size={size}, amount={amount} USDC, "
+                f"Placing {direction} order: "
+                f"token={token_id[:16]}... | "
+                f"price={best_price} | "
+                f"size={size} shares | "
+                f"cost={best_price * size:.2f} USDC | "
+                f"slot={market['market_slug']} | "
                 f"neg_risk={neg_risk}"
             )
 
@@ -449,20 +539,25 @@ class PolymarketClient:
             trade_data = {
                 "order_id": str(order_id),
                 "direction": direction,
-                "amount": amount,
+                "amount": round(best_price * size, 2),  # Actual USDC cost
                 "price": best_price,
                 "size": size,
                 "token_id": token_id,
                 "slot_ts": slot_ts,
                 "slot_dt": market["slot_dt"],
                 "question": market["question"],
+                "market_slug": market["market_slug"],
                 "status": status,
                 "filled_at": datetime.now(timezone.utc).isoformat(),
             }
 
             logger.info(
-                f"Trade placed: {direction} | order={order_id} | "
-                f"price={best_price} | size={size} | slot={market['slot_dt']}"
+                f"Trade placed: {direction} | "
+                f"order={order_id} | "
+                f"price={best_price} | "
+                f"size={size} shares | "
+                f"cost={best_price * size:.2f} USDC | "
+                f"slot={market['market_slug']}"
             )
             return {"success": True, "data": trade_data, "error": None}
 
