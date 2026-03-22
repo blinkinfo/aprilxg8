@@ -271,7 +271,7 @@ class PositionRedeemer:
             neg_risk: Whether this is a neg-risk market
 
         Returns:
-            (target_address, calldata_bytes)
+            (target_address, calldata_hex_string)
         """
         condition_bytes = bytes.fromhex(
             condition_id[2:] if condition_id.startswith("0x") else condition_id
@@ -282,23 +282,21 @@ class PositionRedeemer:
 
         if neg_risk:
             # NegRisk markets: call NegRiskAdapter.redeemPositions(conditionId, indexSets)
-            calldata = self._neg_risk_adapter.functions.redeemPositions(
-                condition_bytes,
-                index_sets,
-            ).build_transaction({"gas": 0})["data"]
+            calldata = self._neg_risk_adapter.encodeABI(
+                fn_name="redeemPositions",
+                args=[condition_bytes, index_sets],
+            )
             target = NEG_RISK_ADAPTER_ADDRESS
         else:
             # Standard markets: call CTF.redeemPositions(collateral, parent, conditionId, indexSets)
             parent_collection = b"\x00" * 32
-            calldata = self._ctf.functions.redeemPositions(
-                USDC_E_ADDRESS,
-                parent_collection,
-                condition_bytes,
-                index_sets,
-            ).build_transaction({"gas": 0})["data"]
+            calldata = self._ctf.encodeABI(
+                fn_name="redeemPositions",
+                args=[USDC_E_ADDRESS, parent_collection, condition_bytes, index_sets],
+            )
             target = CTF_ADDRESS
 
-        return target, bytes.fromhex(calldata[2:] if calldata.startswith("0x") else calldata)
+        return target, calldata
 
     def _build_safe_signatures(self) -> bytes:
         """Build pre-approved hash signatures for single-owner Safe.
@@ -325,14 +323,39 @@ class PositionRedeemer:
         sig_hex = r_padded + s_padded + v
         return bytes.fromhex(sig_hex)
 
+    def _get_eip1559_fees(self) -> dict:
+        """Get EIP-1559 gas fee parameters for Polygon.
+
+        Returns:
+            dict with maxFeePerGas and maxPriorityFeePerGas
+        """
+        # Get the latest base fee from the pending block
+        latest_block = self._w3.eth.get_block("latest")
+        base_fee = latest_block.get("baseFeePerGas", self._w3.eth.gas_price)
+
+        # Priority fee (tip) — use eth_maxPriorityFeePerGas if available,
+        # otherwise default to 30 gwei which is standard for Polygon
+        try:
+            max_priority_fee = self._w3.eth.max_priority_fee
+        except Exception:
+            max_priority_fee = self._w3.to_wei(30, "gwei")
+
+        # Max fee = 2x base fee + priority fee (gives headroom for base fee spikes)
+        max_fee_per_gas = (2 * base_fee) + max_priority_fee
+
+        return {
+            "maxFeePerGas": max_fee_per_gas,
+            "maxPriorityFeePerGas": max_priority_fee,
+        }
+
     def _build_safe_tx(
-        self, target: str, calldata: bytes
+        self, target: str, calldata: str
     ) -> dict:
         """Wrap a call inside Safe's execTransaction.
 
         Args:
             target: Contract to call (CTF or NegRiskAdapter)
-            calldata: Encoded function call
+            calldata: Hex-encoded function call (0x-prefixed)
 
         Returns:
             Transaction dict ready for signing and sending
@@ -340,45 +363,68 @@ class PositionRedeemer:
         signatures = self._build_safe_signatures()
         zero_addr = Web3.to_checksum_address("0x" + "00" * 20)
 
-        tx_data = self._safe_contract.functions.execTransaction(
-            Web3.to_checksum_address(target),  # to
-            0,                                  # value
-            calldata,                           # data
-            0,                                  # operation (Call)
-            0,                                  # safeTxGas
-            0,                                  # baseGas
-            0,                                  # gasPrice
-            zero_addr,                          # gasToken
-            zero_addr,                          # refundReceiver
-            signatures,                         # signatures
-        ).build_transaction({
+        # Convert calldata hex string to bytes for the Safe contract call
+        calldata_bytes = bytes.fromhex(
+            calldata[2:] if calldata.startswith("0x") else calldata
+        )
+
+        # Encode the execTransaction call
+        exec_calldata = self._safe_contract.encodeABI(
+            fn_name="execTransaction",
+            args=[
+                Web3.to_checksum_address(target),  # to
+                0,                                  # value
+                calldata_bytes,                     # data
+                0,                                  # operation (Call)
+                0,                                  # safeTxGas
+                0,                                  # baseGas
+                0,                                  # gasPrice (Safe internal, not tx-level)
+                zero_addr,                          # gasToken
+                zero_addr,                          # refundReceiver
+                signatures,                         # signatures
+            ],
+        )
+
+        # Get EIP-1559 gas fees
+        fees = self._get_eip1559_fees()
+
+        tx_data = {
             "from": self._eoa_address,
+            "to": self._funder_address,
+            "data": exec_calldata,
             "chainId": 137,
-            "gas": 500_000,  # Will be estimated below
+            "gas": 500_000,  # Will be estimated in redeem_position()
             "nonce": self._w3.eth.get_transaction_count(self._eoa_address),
-        })
+            "type": 2,  # EIP-1559 transaction
+            **fees,
+        }
 
         return tx_data
 
     def _build_direct_tx(
-        self, target: str, calldata: bytes
+        self, target: str, calldata: str
     ) -> dict:
         """Build a direct transaction (non-Safe, signature_type != 2).
 
         Args:
             target: Contract to call
-            calldata: Encoded function call
+            calldata: Hex-encoded function call (0x-prefixed)
 
         Returns:
             Transaction dict
         """
+        # Get EIP-1559 gas fees
+        fees = self._get_eip1559_fees()
+
         tx_data = {
             "from": self._eoa_address,
             "to": Web3.to_checksum_address(target),
-            "data": "0x" + calldata.hex(),
+            "data": calldata,
             "chainId": 137,
-            "gas": 500_000,
+            "gas": 500_000,  # Will be estimated in redeem_position()
             "nonce": self._w3.eth.get_transaction_count(self._eoa_address),
+            "type": 2,  # EIP-1559 transaction
+            **fees,
         }
         return tx_data
 
@@ -417,7 +463,7 @@ class PositionRedeemer:
         }
 
         try:
-            # Build calldata
+            # Build calldata (returns hex string now, not bytes)
             target, calldata = self._build_redeem_calldata(condition_id, neg_risk)
 
             # Build transaction (Safe-wrapped or direct)
@@ -436,10 +482,6 @@ class PositionRedeemer:
                     f"using default 500k: {gas_err}"
                 )
                 tx["gas"] = 500_000
-
-            # Get current gas price
-            gas_price = self._w3.eth.gas_price
-            tx["gasPrice"] = int(gas_price * 1.1)  # 10% tip
 
             # Sign and send
             signed = self._account.sign_transaction(tx)
