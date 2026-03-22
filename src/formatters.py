@@ -3,11 +3,13 @@
 All message formatting is centralized here, separated from business logic.
 Uses Telegram HTML parse mode for rich formatting.
 
-Conventions:
-- All messages use HTML parse_mode
-- Dollar PnL is shown for binary trading ($0.96 win / $1.00 loss)
-- Emoji used purposefully for visual hierarchy, not decoration
-- Polymarket trade and status formatters included
+Design System:
+- One emoji per section header, not per line
+- No pipe separators, no ASCII bars
+- <code> blocks for monospace data alignment
+- Hero info first (direction, result, P&L)
+- Consistent emoji vocabulary across all messages
+- Streak emojis only at 3+
 """
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -67,7 +69,7 @@ def _dollar_pnl(result: Optional[str]) -> str:
         return f"-${LOSS_PAYOUT:.2f}"
     elif result == "NEUTRAL":
         return "$0.00"
-    return "---"
+    return ""
 
 
 def _total_dollar_pnl(wins: int, losses: int) -> float:
@@ -75,32 +77,15 @@ def _total_dollar_pnl(wins: int, losses: int) -> float:
     return (wins * WIN_PAYOUT) - (losses * LOSS_PAYOUT)
 
 
-def _win_rate_bar(win_rate: float, width: int = 20) -> str:
-    """Create a visual win rate bar.
-
-    E.g. 60% -> '||||||||||||--------'
-    """
-    filled = round(win_rate / 100 * width)
-    empty = width - filled
-    return "|" * filled + "-" * empty
-
-
-def _prob_bar(prob_up: float, total_width: int = 20) -> str:
-    """Create a visual probability split bar.
-
-    E.g. 57% up -> '|||||||||||---------'
-    """
-    up_blocks = round(prob_up * total_width)
-    down_blocks = total_width - up_blocks
-    return "|" * up_blocks + "-" * down_blocks
-
-
 def _streak_display(streak_count: int, streak_type: str) -> str:
-    """Format streak display with emoji."""
+    """Format streak display with emoji only at 3+."""
     if streak_count == 0 or not streak_type:
         return "--"
-    emoji = "\U0001f525" if streak_type == "WIN" else "\u2744\ufe0f"  # fire / snowflake
-    return f"{streak_count}{streak_type[0]} {emoji}" if streak_count >= 3 else f"{streak_count}{streak_type[0]}"
+    label = f"{streak_count}{streak_type[0]}"
+    if streak_count >= 3:
+        emoji = "\U0001f525" if streak_type == "WIN" else "\u2744\ufe0f"
+        return f"{label} {emoji}"
+    return label
 
 
 # ============================================================
@@ -120,40 +105,30 @@ def format_signal(signal, prediction: dict) -> str:
     direction = signal.direction
     confidence = signal.confidence
     slot_str = _format_slot(signal.candle_slot_ts) if signal.candle_slot_ts else "N/A"
-    sent_at = _format_utc(signal.timestamp)
     price = f"${signal.entry_price:,.2f}"
 
-    prob_up = prediction.get("prob_up", 0)
-    prob_down = prediction.get("prob_down", 0)
     model_acc = prediction.get("model_accuracy", 0)
     strength = prediction.get("strength", "NORMAL")
 
     # Direction styling
     if direction == "UP":
         dir_emoji = "\U0001f7e2"  # green circle
-        dir_arrow = "\u2b06\ufe0f"   # up arrow
     else:
         dir_emoji = "\U0001f534"  # red circle
-        dir_arrow = "\u2b07\ufe0f"   # down arrow
 
     # Strength badge
-    strength_badge = "  \u26a1 <b>STRONG</b>" if strength == "STRONG" else ""
-
-    # Probability bar
-    bar = _prob_bar(prob_up)
+    strength_badge = "            \u26a1 <b>STRONG</b>" if strength == "STRONG" else ""
 
     lines = [
-        f"{dir_emoji} <b>SIGNAL #{signal.signal_id}</b>{strength_badge}",
+        f"\U0001f4e1  <b>SIGNAL #{signal.signal_id}</b>{strength_badge}",
         "",
-        f"{dir_arrow} <b>{direction}</b>  |  <code>{slot_str}</code>",
+        f"{dir_emoji} <b>{direction}</b>     {slot_str}",
         "",
-        f"\U0001f4ca <b>Confidence</b>   <code>{confidence:.1%}</code>",
-        f"\U0001f4b0 <b>Price</b>            <code>{price}</code>",
-        "",
-        f"  P(Up) <code>{prob_up:.1%}</code>  <code>{bar}</code>  P(Down) <code>{prob_down:.1%}</code>",
-        "",
-        f"\U0001f916 Model Accuracy   <code>{model_acc:.1%}</code>",
-        f"\U0001f552 Sent   <code>{sent_at}</code>",
+        "<code>"
+        f"Confidence       {confidence:.1%}\n"
+        f"Price         {price}\n"
+        f"Model            {model_acc:.1%}"
+        "</code>",
     ]
 
     return "\n".join(lines)
@@ -175,7 +150,6 @@ def format_resolution(signal, stats) -> str:
     """
     result = signal.result
     slot_str = _format_slot(signal.candle_slot_ts) if signal.candle_slot_ts else "N/A"
-    resolved_at = _format_utc(signal.resolved_at) if signal.resolved_at else "N/A"
 
     # Result styling
     if result == "WIN":
@@ -191,11 +165,11 @@ def format_resolution(signal, stats) -> str:
         result_label = "NEUTRAL"
         dollar = "$0.00"
 
-    # Direction emoji for the prediction
-    pred_emoji = "\u2b06\ufe0f" if signal.direction == "UP" else "\u2b07\ufe0f"
-
-    # Calculate move percentage
-    move_pct = signal.pnl_pct if signal.pnl_pct is not None else 0.0
+    # Direction emoji
+    if signal.direction == "UP":
+        dir_emoji = "\U0001f7e2"
+    else:
+        dir_emoji = "\U0001f534"
 
     # Running totals
     total_dollar = _total_dollar_pnl(stats.wins, stats.losses)
@@ -203,21 +177,20 @@ def format_resolution(signal, stats) -> str:
     streak_str = _streak_display(stats.current_streak, stats.current_streak_type)
 
     lines = [
-        f"{result_emoji} <b>RESULT</b>  |  Signal #{signal.signal_id}",
+        f"{result_emoji}  <b>{result_label}</b>  <code>{dollar}</code>            Signal #{signal.signal_id}",
         "",
-        f"    <b>{result_label}</b>  <code>{dollar}</code>",
+        f"{dir_emoji} <b>{signal.direction}</b>     {slot_str}",
         "",
-        f"\U0001f552 <code>{slot_str}</code>",
-        f"{pred_emoji} Predicted   <b>{signal.direction}</b>",
-        f"\U0001f4c2 Open            <code>${signal.candle_open_price:,.2f}</code>",
-        f"\U0001f4c3 Close           <code>${signal.exit_price:,.2f}</code>",
-        f"\U0001f4c8 Move            <code>{move_pct:+.4f}%</code>",
+        "<code>"
+        f"Open         ${signal.candle_open_price:,.2f}\n"
+        f"Close        ${signal.exit_price:,.2f}"
+        "</code>",
         "",
-        f"\U0001f3af Record     <code>{stats.wins}W - {stats.losses}L  ({stats.win_rate:.1f}%)</code>",
-        f"\U0001f4b5 Total PnL  <code>{total_sign}${abs(total_dollar):.2f}</code>",
-        f"\U0001f525 Streak     <code>{streak_str}</code>",
-        "",
-        f"\u23f1 Resolved   <code>{resolved_at}</code>",
+        "<code>"
+        f"Record       {stats.wins}W - {stats.losses}L  ({stats.win_rate:.1f}%)\n"
+        f"P&amp;L          {total_sign}${abs(total_dollar):.2f}\n"
+        f"Streak       {streak_str}"
+        "</code>",
     ]
 
     return "\n".join(lines)
@@ -251,9 +224,6 @@ def format_stats(stats) -> str:
         avg_dollar = 0.0
         avg_sign = ""
 
-    # Win rate bar
-    bar = _win_rate_bar(stats.win_rate)
-
     # Streak display
     streak_str = _streak_display(stats.current_streak, stats.current_streak_type)
 
@@ -262,29 +232,27 @@ def format_stats(stats) -> str:
     last_sig_str = _format_utc_short(stats.last_signal_time) if stats.last_signal_time else "--"
 
     lines = [
-        "\U0001f4ca <b>PERFORMANCE DASHBOARD</b>",
+        "\U0001f4ca  <b>PERFORMANCE</b>",
         "",
-        "\U0001f4cb <b>Overview</b>",
-        f"  Total  <code>{stats.total_signals}</code>  |  Resolved  <code>{resolved}</code>  |  Pending  <code>{stats.pending}</code>",
-        "",
-        "\U0001f3af <b>Win Rate</b>",
-        f"  <code>{stats.wins}W - {stats.losses}L</code>  <b>{stats.win_rate:.1f}%</b>",
-        f"  <code>{bar}</code>",
+        "\U0001f3c6 <b>Win Rate</b>",
+        f"<code>    {stats.wins}W  -  {stats.losses}L         {stats.win_rate:.1f}%</code>",
         "",
         "\U0001f4b0 <b>Profit &amp; Loss</b>",
-        f"  Total         <code>{total_sign}${abs(total_dollar):.2f}</code>  <code>({stats.total_pnl_pct:+.4f}%)</code>",
-        f"  Avg/Trade     <code>{avg_sign}${abs(avg_dollar):.2f}</code>",
-        f"  Avg Win       <code>+${WIN_PAYOUT:.2f}</code>  |  Avg Loss  <code>-${LOSS_PAYOUT:.2f}</code>",
-        f"  Best          <code>{stats.best_trade_pct:+.4f}%</code>  |  Worst  <code>{stats.worst_trade_pct:+.4f}%</code>",
+        f"<code>    Total               {total_sign}${abs(total_dollar):.2f}\n"
+        f"    Per Trade            {avg_sign}${abs(avg_dollar):.2f}</code>",
         "",
         "\U0001f525 <b>Streaks</b>",
-        f"  Current      <code>{streak_str}</code>",
-        f"  Best Win     <code>{stats.longest_win_streak}</code>  |  Worst Loss  <code>{stats.longest_loss_streak}</code>",
+        f"<code>    Current              {streak_str}\n"
+        f"    Best Win             {stats.longest_win_streak}\n"
+        f"    Worst Loss           {stats.longest_loss_streak}</code>",
         "",
         "\U0001f916 <b>Model</b>",
-        f"  Confidence Avg  <code>{stats.avg_confidence:.1%}</code>",
-        f"  Session Start   <code>{session_str}</code>",
-        f"  Last Signal     <code>{last_sig_str}</code>",
+        f"<code>    Avg Confidence       {stats.avg_confidence:.1%}\n"
+        f"    Session Start        {session_str}\n"
+        f"    Last Signal          {last_sig_str}</code>",
+        "",
+        "\U0001f4cb <b>Signals</b>",
+        f"<code>    Total  {stats.total_signals}     Resolved  {resolved}     Pending  {stats.pending}</code>",
     ]
 
     return "\n".join(lines)
@@ -307,7 +275,7 @@ def format_recent(signals: list, stats=None) -> str:
     if not signals:
         return "\U0001f4cb No signals recorded yet."
 
-    lines = ["\U0001f4cb <b>RECENT SIGNALS</b>", ""]
+    lines = ["\U0001f4cb  <b>RECENT SIGNALS</b>", ""]
 
     # Count wins/losses in this batch for summary
     batch_wins = 0
@@ -317,39 +285,41 @@ def format_recent(signals: list, stats=None) -> str:
         # Result styling
         if s.result == "WIN":
             r_emoji = "\u2705"
-            r_label = "WIN"
             dollar = f"+${WIN_PAYOUT:.2f}"
             batch_wins += 1
         elif s.result == "LOSS":
             r_emoji = "\u274c"
-            r_label = "LOSS"
             dollar = f"-${LOSS_PAYOUT:.2f}"
             batch_losses += 1
         else:
             r_emoji = "\u23f3"  # hourglass
-            r_label = "PENDING"
-            dollar = "   ---"
+            dollar = ""
 
         # Direction emoji
-        d_emoji = "\u2b06\ufe0f" if s.direction == "UP" else "\u2b07\ufe0f"
+        if s.direction == "UP":
+            d_emoji = "\U0001f7e2"
+        else:
+            d_emoji = "\U0001f534"
 
         # Slot time
         if s.candle_slot_ts:
             try:
                 dt = datetime.fromisoformat(s.candle_slot_ts)
                 end_dt = dt + timedelta(minutes=5)
-                slot = f"{dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')} UTC"
+                slot = f"{dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')} UTC"
             except (ValueError, TypeError):
                 slot = "--"
         else:
             slot = "--"
 
+        # Build signal line - dollar only shown if resolved
+        dollar_part = f"   {dollar}" if dollar else ""
         lines.append(
-            f"  {r_emoji} <b>#{s.signal_id}</b>  {d_emoji} {s.direction}  "
-            f"<b>{r_label}</b>  <code>{dollar}</code>"
+            f" {r_emoji}  <b>#{s.signal_id}</b>  {d_emoji} <b>{s.direction}</b>"
+            f"     <code>{s.confidence:.1%}</code>{dollar_part}"
         )
         lines.append(
-            f"       <code>{slot}</code>  |  <code>{s.confidence:.1%}</code>"
+            f"          <code>{slot}</code>"
         )
         lines.append("")
 
@@ -359,8 +329,8 @@ def format_recent(signals: list, stats=None) -> str:
     batch_resolved = batch_wins + batch_losses
     if batch_resolved > 0:
         lines.append(
-            f"\U0001f4ca Summary: <code>{batch_wins}W - {batch_losses}L</code> last {len(signals)}"
-            f"  |  <code>{batch_sign}${abs(batch_total):.2f}</code>"
+            f"<code>Summary   {batch_wins}W - {batch_losses}L"
+            f"     {batch_sign}${abs(batch_total):.2f}</code>"
         )
 
     return "\n".join(lines)
@@ -406,25 +376,30 @@ def format_status(
     tuned_str = "(tuned)" if optuna_tuned else "(defaults)"
 
     lines = [
-        "\u2699\ufe0f <b>SYSTEM STATUS</b>",
+        "\u2699\ufe0f  <b>SYSTEM STATUS</b>",
         "",
-        f"  {status_emoji} Bot          <code>{status_label}</code>",
-        f"  \u23f1 Uptime       <code>{uptime_str}</code>",
-        f"  \U0001f4b9 Symbol       <code>{symbol}</code>",
+        "<code>"
+        f"Status           {status_emoji} {status_label}\n"
+        f"Uptime           {uptime_str}"
+        "</code>",
         "",
         "\U0001f916 <b>Model</b>",
-        f"  Accuracy       <code>{model_accuracy:.1%}</code>",
-        f"  Samples        <code>{train_samples:,}</code>",
-        f"  Last Trained   <code>{trained_str}</code>",
-        f"  Next Retrain   <code>{retrain_remaining}</code>",
-        f"  Optuna         <code>{optuna_str} {tuned_str}</code>",
+        "<code>"
+        f"Accuracy         {model_accuracy:.1%}\n"
+        f"Samples          {train_samples:,}\n"
+        f"Last Trained     {trained_str}\n"
+        f"Next Retrain     {retrain_remaining}\n"
+        f"Optuna           {optuna_str} {tuned_str}"
+        "</code>",
         "",
-        "\u2699\ufe0f <b>Config</b>",
-        f"  Confidence     <code>&gt;= {confidence_min:.0%}</code>",
-        f"  Retrain Gate   <code>{retrain_gate:.3f}</code>",
+        "\U0001f4d0 <b>Config</b>",
+        "<code>"
+        f"Confidence       &gt;= {confidence_min:.0%}\n"
+        f"Retrain Gate     {retrain_gate:.3f}"
+        "</code>",
         "",
-        "\U0001f4e1 <b>Signals</b>",
-        f"  Total  <code>{total_signals}</code>  |  Pending  <code>{pending}</code>",
+        "\U0001f4cb <b>Signals</b>",
+        f"<code>Total  {total_signals}     Pending  {pending}</code>",
     ]
 
     return "\n".join(lines)
@@ -437,33 +412,25 @@ def format_status(
 def format_start(chat_id: int) -> str:
     """Format the /start welcome message."""
     lines = [
-        "\U0001f680 <b>Welcome to AprilXG v2</b>",
+        "\U0001f680  <b>AprilXG v2</b>",
         "",
-        "\U0001f4b9 <b>BTC 5-Min Binary Signal Bot</b>",
-        "Powered by XGBoost ML",
+        "BTC 5-min binary signals",
+        "Win <code>+$0.96</code>  \u00b7  Loss <code>-$1.00</code>",
         "",
-        "Signals are posted automatically",
-        "before each 5-min candle opens.",
+        "Signals fire automatically before",
+        "each candle opens.",
         "",
-        f"\u2705 Win: <code>+$0.96</code>  |  \u274c Loss: <code>-$1.00</code>",
-        f"\u2696\ufe0f Breakeven: <code>51.04%</code> win rate",
+        "\U0001f4cb <b>Commands</b>",
+        "<code>/stats          Performance\n"
+        "/recent         Last 10 signals\n"
+        "/status         Bot &amp; model info</code>",
         "",
-        "\U0001f4dd <b>Commands</b>",
-        "  /stats        \U0001f4ca  Performance dashboard",
-        "  /recent       \U0001f4cb  Last 10 signals",
-        "  /status       \u2699\ufe0f   Bot &amp; model info",
-        "  /retrain      \U0001f504  Force model retrain",
-        "  /help         \u2753  Command reference",
+        "\U0001f4b0 <b>Trading</b>",
+        "<code>/autotrade      Toggle trading\n"
+        "/balance        Wallet balance\n"
+        "/positions      Open positions</code>",
         "",
-        "\U0001f4b0 <b>Polymarket</b>",
-        "  /autotrade    Toggle auto-trading",
-        "  /setamount    Set trade amount",
-        "  /balance      Wallet balance",
-        "  /positions    Open positions",
-        "  /pmstatus     Connection status",
-        "  /redeem      Redeem resolved positions",
-        "",
-        f"\U0001f194 Chat ID: <code>{chat_id}</code>",
+        "Type /help for all commands.",
     ]
 
     return "\n".join(lines)
@@ -476,36 +443,30 @@ def format_start(chat_id: int) -> str:
 def format_help() -> str:
     """Format the /help message."""
     lines = [
-        "\u2753 <b>AprilXG v2 \u2014 Help</b>",
+        "\u2753  <b>HELP</b>",
         "",
-        "This bot predicts the direction of the next",
-        "BTC 5-minute candle using an XGBoost ML model",
-        "with multi-timeframe feature engineering.",
+        "\U0001f4cb <b>Signals</b>",
+        "<code>/stats           Full performance dashboard\n"
+        "/recent          Last 10 signals with results\n"
+        "/status          Bot &amp; model info\n"
+        "/retrain         Force model retraining</code>",
         "",
-        "\U0001f4dd <b>Signal Commands</b>",
-        "  /stats     \U0001f4ca  Full performance stats (W/L, PnL, streaks)",
-        "  /recent    \U0001f4cb  Last 10 signals with results",
-        "  /status    \u2699\ufe0f   Model &amp; bot status",
-        "  /retrain   \U0001f504  Force model retraining",
-        "  /start     \U0001f680  Show welcome &amp; chat ID",
-        "  /help      \u2753  This help message",
+        "\U0001f4b0 <b>Trading</b>",
+        "<code>/autotrade       Toggle auto-trading ON/OFF\n"
+        "/setamount       Set trade size (e.g. /setamount 1.50)\n"
+        "/balance         Wallet USDC balance\n"
+        "/positions       Open positions\n"
+        "/pmstatus        Connection status\n"
+        "/redeem          Redeem resolved positions</code>",
         "",
-        "\U0001f4b0 <b>Polymarket Trading</b>",
-        "  /autotrade   Toggle auto-trading ON/OFF",
-        "  /setamount   Set USDC trade amount (e.g. /setamount 1.50)",
-        "  /balance     Check wallet USDC balance",
-        "  /positions   View open Polymarket positions",
-        "  /pmstatus    Polymarket connection &amp; config status",
-        "  /redeem     \U0001f4b0  Redeem resolved positions on-chain",
+        "\u26a1 <b>Signal Strength</b>",
+        "<code>  STRONG         Confidence &gt;= 60%\n"
+        "  NORMAL         Confidence 55-60%\n"
+        "  Below 55% signals are skipped.</code>",
         "",
-        "\U0001f4a1 <b>Signal Strength</b>",
-        f"  \u26a1 <b>STRONG</b> \u2014 Confidence \u2265 60%",
-        f"  \U0001f7e2 <b>NORMAL</b> \u2014 Confidence 55-60%",
-        "  Signals below 55% are skipped.",
-        "",
-        "\U0001f4b0 <b>Payouts</b>",
-        f"  Win: <code>+$0.96</code>  |  Loss: <code>-$1.00</code>",
-        f"  Breakeven win rate: <code>51.04%</code>",
+        "\U0001f4b5 <b>Payouts</b>",
+        "<code>  Win  +$0.96    Loss  -$1.00\n"
+        "  Breakeven      51.04% win rate</code>",
     ]
 
     return "\n".join(lines)
@@ -528,39 +489,41 @@ def format_training_complete(metrics: dict, previous_accuracy: float) -> str:
     swapped = metrics.get("model_swapped", False)
     new_acc = metrics.get("val_accuracy", 0)
     active_acc = metrics.get("active_val_accuracy", 0)
-    cv_acc = metrics.get("cv_accuracy", 0)
-    logloss = metrics.get("val_logloss", 0)
     samples = metrics.get("total_samples", 0)
-    features = metrics.get("n_features", 0)
     optuna_tuned = metrics.get("optuna_tuned", False)
 
     # Delta from previous
     delta = new_acc - previous_accuracy
-    delta_str = f"({delta:+.1%})" if previous_accuracy > 0 else ""
-
-    if swapped:
-        status_emoji = "\u2705"
-        status_label = "New model active"
-    else:
-        status_emoji = "\U0001f6e1\ufe0f"
-        status_label = "Kept previous model"
+    delta_str = f"  ({delta:+.1%})" if previous_accuracy > 0 else ""
 
     params_str = "Optuna-tuned" if optuna_tuned else "Default params"
 
-    lines = [
-        "\U0001f504 <b>MODEL RETRAINED</b>",
-        "",
-        f"  {status_emoji} Status   <b>{status_label}</b>",
-        "",
-        "\U0001f4ca <b>Metrics</b>",
-        f"  Val Accuracy    <code>{new_acc:.1%}</code>  <code>{delta_str}</code>",
-        f"  Active Accuracy <code>{active_acc:.1%}</code>",
-        f"  CV Accuracy     <code>{cv_acc:.1%}</code>",
-        f"  Log Loss        <code>{logloss:.4f}</code>",
-        f"  Samples         <code>{samples:,}</code>",
-        f"  Features        <code>{features}</code>",
-        f"  Params          <code>{params_str}</code>",
-    ]
+    if swapped:
+        status_emoji = "\u2705"
+        status_label = "Active"
+
+        lines = [
+            f"\U0001f504  <b>MODEL RETRAINED</b>        {status_emoji} {status_label}",
+            "",
+            "<code>"
+            f"Accuracy         {new_acc:.1%}{delta_str}\n"
+            f"Samples          {samples:,}\n"
+            f"Params           {params_str}"
+            "</code>",
+        ]
+    else:
+        status_emoji = "\U0001f6e1\ufe0f"
+        status_label = "Kept Previous"
+
+        lines = [
+            f"\U0001f504  <b>MODEL RETRAINED</b>        {status_emoji} {status_label}",
+            "",
+            "<code>"
+            f"New Accuracy     {new_acc:.1%}\n"
+            f"Active           {active_acc:.1%}  (better)\n"
+            f"Samples          {samples:,}"
+            "</code>",
+        ]
 
     return "\n".join(lines)
 
@@ -582,32 +545,27 @@ def format_startup(
 ) -> str:
     """Format bot startup/online message."""
     days = train_candles * 5 // 1440
-    optuna_str = "ON" if optuna_enabled else "OFF"
 
-    lines = [
-        "\U0001f680 <b>AprilXG v2 Online</b>",
-        "",
-        f"  \U0001f916 Model        <code>{model_accuracy:.1%} accuracy</code>",
-        f"  \U0001f3af Threshold    <code>&gt;= {confidence_min:.0%} confidence</code>",
-        f"  \U0001f4ca Data         <code>{train_candles:,} candles (~{days}d)</code>",
-        f"  \u2699\ufe0f  Optuna       <code>{optuna_str}</code>",
-        f"  \U0001f6e1\ufe0f Gate         <code>{retrain_gate:.3f} min improvement</code>",
-        f"  \U0001f4e1 Signals      <code>{tracked_signals} tracked</code>",
-        f"  \U0001f4b9 Symbol       <code>{symbol}</code>",
-    ]
-
-    # Polymarket status line
+    pm_str = ""
     if polymarket_enabled:
         at_str = "ON" if autotrade_on else "OFF"
-        lines.append(f"  \U0001f4b0 Polymarket   <code>Connected (autotrade {at_str})</code>")
+        pm_str = f"\nPolymarket       Connected (autotrade {at_str})"
     else:
-        lines.append(f"  \U0001f4b0 Polymarket   <code>Disabled</code>")
+        pm_str = "\nPolymarket       Disabled"
 
-    lines.extend([
+    lines = [
+        "\U0001f7e2  <b>AprilXG v2 Online</b>",
         "",
-        "Signals posted automatically.",
+        "<code>"
+        f"Model            {model_accuracy:.1%} accuracy\n"
+        f"Threshold        &gt;= {confidence_min:.0%} confidence\n"
+        f"Data             {train_candles:,} candles (~{days}d)\n"
+        f"Signals          {tracked_signals} tracked"
+        f"{pm_str}"
+        "</code>",
+        "",
         "Type /help for commands.",
-    ])
+    ]
 
     return "\n".join(lines)
 
@@ -618,7 +576,7 @@ def format_startup(
 
 def format_shutdown() -> str:
     """Format bot shutdown message."""
-    return "\U0001f534 <b>AprilXG v2 Offline</b>\n\nBot is shutting down..."
+    return "\U0001f534  <b>AprilXG v2 Offline</b>"
 
 
 # ============================================================
@@ -627,21 +585,21 @@ def format_shutdown() -> str:
 
 def format_retrain_started() -> str:
     """Format retrain-in-progress message."""
-    return "\U0001f504 <b>Retraining model...</b>\n\nThis may take a few minutes."
+    return "\U0001f504  <b>Retraining model...</b>\nThis may take a few minutes."
 
 
 def format_retrain_complete(accuracy: float) -> str:
     """Format retrain success message for /retrain command."""
     return (
-        f"\u2705 <b>Retrain complete!</b>\n\n"
-        f"Active model accuracy: <code>{accuracy:.1%}</code>"
+        f"\u2705  <b>Retrain complete</b>\n"
+        f"Accuracy  <code>{accuracy:.1%}</code>"
     )
 
 
 def format_retrain_failed(error: str) -> str:
     """Format retrain failure message."""
     safe_error = _escape_html(error[:200])
-    return f"\u274c <b>Retrain failed</b>\n\n<code>{safe_error}</code>"
+    return f"\u274c  <b>Retrain failed</b>\n\n<code>{safe_error}</code>"
 
 
 # ============================================================
@@ -651,7 +609,7 @@ def format_retrain_failed(error: str) -> str:
 def format_training_failed(error: str) -> str:
     """Format training failure notification."""
     safe_error = _escape_html(error[:200])
-    return f"\u274c <b>Model training failed</b>\n\n<code>{safe_error}</code>"
+    return f"\u274c  <b>Model training failed</b>\n\n<code>{safe_error}</code>"
 
 
 # ============================================================
@@ -671,22 +629,17 @@ def format_trade_execution(trade_data: dict) -> str:
     direction = trade_data.get("direction", "?")
     amount = trade_data.get("amount", 0)
     price = trade_data.get("price", 0)
-    size = trade_data.get("size", 0)
-    order_id = trade_data.get("order_id", "N/A")
     slot_dt = trade_data.get("slot_dt", "")
     confidence = trade_data.get("confidence", 0)
     strength = trade_data.get("strength", "NORMAL")
-    status = trade_data.get("status", "PLACED")
 
     # Direction styling
     if direction == "UP":
         dir_emoji = "\U0001f7e2"  # green circle
-        side_label = "YES (Up)"
     else:
         dir_emoji = "\U0001f534"  # red circle
-        side_label = "NO (Down)"
 
-    strength_badge = "  \u26a1" if strength == "STRONG" else ""
+    strength_badge = "     \u26a1" if strength == "STRONG" else ""
 
     # Slot time formatting
     slot_str = ""
@@ -699,22 +652,16 @@ def format_trade_execution(trade_data: dict) -> str:
             slot_str = str(slot_dt)[:19]
 
     lines = [
-        f"{dir_emoji} <b>TRADE PLACED</b>{strength_badge}",
+        "\U0001f4b0  <b>TRADE PLACED</b>",
         "",
-        f"  Side        <b>{side_label}</b>",
-        f"  Amount      <code>${amount:.2f} USDC</code>",
-        f"  Price       <code>{price:.4f}</code>",
-        f"  Size        <code>{size:.2f} shares</code>",
+        f"{dir_emoji} <b>{direction}</b>     {slot_str}{strength_badge}",
+        "",
+        "<code>"
+        f"Amount           ${amount:.2f}\n"
+        f"Confidence       {confidence:.1%}\n"
+        f"Fill Price       {price:.4f}"
+        "</code>",
     ]
-
-    if slot_str:
-        lines.append(f"  Slot        <code>{slot_str}</code>")
-
-    lines.extend([
-        f"  Confidence  <code>{confidence:.1%}</code>",
-        f"  Status      <code>{_escape_html(status)}</code>",
-        f"  Order       <code>{_escape_html(str(order_id)[:16])}</code>",
-    ])
 
     return "\n".join(lines)
 
@@ -723,17 +670,17 @@ def format_trade_error(error: str) -> str:
     """Format a trade execution error."""
     safe_error = _escape_html(str(error)[:300])
     return (
-        f"\u274c <b>Trade Error</b>\n\n"
+        f"\u274c  <b>TRADE ERROR</b>\n\n"
         f"<code>{safe_error}</code>\n\n"
-        f"Auto-trading continues. Check /pmstatus for details."
+        f"Check /pmstatus for details."
     )
 
 
 def format_balance(balance: float) -> str:
     """Format Polymarket wallet balance display."""
     return (
-        f"\U0001f4b0 <b>Polymarket Balance</b>\n\n"
-        f"  USDC: <code>${balance:.2f}</code>"
+        f"\U0001f4b0  <b>BALANCE</b>\n\n"
+        f"<code>${balance:.2f} USDC</code>"
     )
 
 
@@ -745,12 +692,11 @@ def format_positions(positions: list) -> str:
                    avg_price, current_value, pnl fields.
     """
     if not positions:
-        return "\U0001f4cb <b>Open Positions</b>\n\nNo open positions."
+        return "\U0001f4cb  <b>OPEN POSITIONS</b>\n\nNo open positions."
 
-    lines = ["\U0001f4cb <b>Open Positions</b>", ""]
+    lines = ["\U0001f4cb  <b>OPEN POSITIONS</b>", ""]
 
     for i, pos in enumerate(positions, 1):
-        market = _escape_html(str(pos.get("market", "Unknown"))[:50])
         outcome = pos.get("outcome", "?")
         size = pos.get("size", 0)
         avg_price = pos.get("avg_price", 0)
@@ -760,12 +706,27 @@ def format_positions(positions: list) -> str:
         pnl_sign = "+" if pnl >= 0 else ""
         pnl_emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
 
-        lines.extend([
-            f"  <b>{i}.</b> {market}",
-            f"     {outcome}  |  <code>{size:.2f}</code> shares @ <code>{avg_price:.4f}</code>",
-            f"     {pnl_emoji} Value: <code>${current_value:.2f}</code>  PnL: <code>{pnl_sign}${abs(pnl):.2f}</code>",
-            "",
-        ])
+        # Map outcome to trader-friendly language
+        display_outcome = outcome
+        outcome_lower = outcome.strip().lower() if outcome else ""
+        if outcome_lower in ("yes", "up"):
+            display_outcome = "UP"
+            out_emoji = "\U0001f7e2"
+        elif outcome_lower in ("no", "down"):
+            display_outcome = "DOWN"
+            out_emoji = "\U0001f534"
+        else:
+            out_emoji = pnl_emoji
+
+        # Extract slot from market title if possible
+        market = _escape_html(str(pos.get("market", "Unknown"))[:50])
+
+        lines.append(f"<b>{i}.</b>  {market}")
+        lines.append(
+            f"<code>    {out_emoji} {display_outcome}   {size:.2f} shares @ {avg_price:.4f}\n"
+            f"    Value ${current_value:.2f}     PnL {pnl_sign}${abs(pnl):.2f}</code>"
+        )
+        lines.append("")
 
     return "\n".join(lines)
 
@@ -789,22 +750,24 @@ def format_pm_status(
     wallet_short = f"{wallet[:6]}...{wallet[-4:]}" if wallet and len(wallet) > 10 else (wallet or "N/A")
 
     lines = [
-        "\U0001f4b0 <b>POLYMARKET STATUS</b>",
+        "\U0001f4b0  <b>POLYMARKET STATUS</b>",
         "",
-        f"  {conn_emoji} Connection   <b>{conn_label}</b>",
-        f"  \U0001f4bc Wallet       <code>{_escape_html(wallet_short)}</code>",
-        f"  \U0001f4b5 Balance      <code>{balance_str}</code>",
-        "",
-        f"  {at_emoji} Auto-Trade   <b>{at_label}</b>",
-        f"  \U0001f4b0 Trade Amt    <code>${trade_amount:.2f} USDC</code>",
-        f"  \U0001f4ca Trades       <code>{session_trades} this session</code>",
+        "<code>"
+        f"Connection       {conn_emoji} {conn_label}\n"
+        f"Wallet           {_escape_html(wallet_short)}\n"
+        f"Balance          {balance_str}\n"
+        f"\n"
+        f"Auto-Trade       {at_emoji} {at_label}\n"
+        f"Trade Amount     ${trade_amount:.2f} USDC\n"
+        f"Session Trades   {session_trades}"
+        "</code>",
     ]
 
     if error:
         safe_error = _escape_html(str(error)[:150])
         lines.extend([
             "",
-            f"  \u26a0\ufe0f Error: <code>{safe_error}</code>",
+            f"\u26a0\ufe0f Error: <code>{safe_error}</code>",
         ])
 
     return "\n".join(lines)
@@ -814,14 +777,14 @@ def format_autotrade_toggle(enabled: bool, amount: float) -> str:
     """Format autotrade toggle confirmation."""
     if enabled:
         return (
-            f"\U0001f7e2 <b>Auto-Trading ON</b>\n\n"
-            f"Trade amount: <code>${amount:.2f} USDC</code> per signal.\n"
-            f"Trades will execute automatically on each signal."
+            f"\U0001f7e2  <b>AUTO-TRADE ON</b>\n\n"
+            f"<code>${amount:.2f} USDC</code> per signal\n"
+            f"Trades execute on every signal."
         )
     else:
         return (
-            f"\u26ab <b>Auto-Trading OFF</b>\n\n"
-            f"Signals will be sent but no trades will be placed."
+            f"\u26ab  <b>AUTO-TRADE OFF</b>\n\n"
+            f"Signals only, no trades."
         )
 
 
@@ -834,21 +797,19 @@ def format_set_amount(result: dict) -> str:
     if result.get("success"):
         amount = result.get("amount", 0)
         return (
-            f"\u2705 <b>Trade amount updated</b>\n\n"
-            f"New amount: <code>${amount:.2f} USDC</code> per trade."
+            f"\u2705  <b>Trade amount updated</b>\n\n"
+            f"<code>${amount:.2f} USDC</code> per trade"
         )
     else:
         msg = _escape_html(result.get("message", "Unknown error"))
-        return f"\u274c <b>Invalid amount</b>\n\n{msg}"
+        return f"\u274c  <b>Invalid amount</b>\n\n{msg}"
 
 
 def format_pm_not_configured() -> str:
     """Format message when Polymarket is not configured."""
     return (
-        "\u26a0\ufe0f <b>Polymarket Not Configured</b>\n\n"
-        "Set <code>POLYMARKET_PRIVATE_KEY</code> environment variable "
-        "to enable Polymarket trading features.\n\n"
-        "See /help for details."
+        "\u26a0\ufe0f  <b>Polymarket not configured</b>\n\n"
+        "Set <code>POLYMARKET_PRIVATE_KEY</code> to enable trading."
     )
 
 
@@ -864,34 +825,32 @@ def format_redemption_result(result: dict) -> str:
 
     if not redeemed and not errors:
         return (
-            "<b>&#128270; Redemption Scan</b>\n\n"
+            "\U0001f50d  <b>Redemption Scan</b>\n\n"
             "No redeemable positions found.\n"
             "Resolved positions are auto-scanned every 2 minutes."
         )
 
-    lines = ["<b>&#128176; Position Redemption</b>\n"]
+    lines = []
 
     if redeemed:
-        lines.append(f"<b>Redeemed: {len(redeemed)}</b>")
+        lines.append(
+            f"\U0001f4b0  <b>REDEMPTION COMPLETE</b>\n\n"
+            f"Redeemed  <b>{len(redeemed)} positions</b>     <code>${total_usdc:.2f}</code>"
+        )
+        lines.append("")
         for r in redeemed:
             title = _escape_html(r.get("title", "Unknown")[:50])
             size = r.get("size", 0)
-            tx = r.get("tx_hash", "")
-            tx_short = tx[:10] + "..." if tx else "n/a"
-            neg = " [NegRisk]" if r.get("neg_risk") else ""
-            lines.append(
-                f"  &#9989; <b>{title}</b>{neg}\n"
-                f"     Size: {size:.4f} USDC | "
-                f'<a href="https://polygonscan.com/tx/{tx}">Tx: {tx_short}</a>'
-            )
-        lines.append(f"\n<b>Total USDC redeemed: ${total_usdc:.4f}</b>")
+            # Try to extract just the slot time from the title for a cleaner display
+            lines.append(f"  \u2705 {title}   <code>${size:.2f}</code>")
+        lines.append("")
 
     if errors:
-        lines.append(f"\n<b>Errors: {len(errors)}</b>")
+        lines.append(f"Errors  <b>{len(errors)}</b>")
         for e in errors:
             title = _escape_html(e.get("title", "Unknown")[:50])
             err_msg = _escape_html(str(e.get("error", "Unknown error"))[:100])
-            lines.append(f"  &#10060; {title}: {err_msg}")
+            lines.append(f"  \u274c {title}   {err_msg}")
 
     return "\n".join(lines)
 
@@ -900,9 +859,9 @@ def format_redeem_status(stats: dict, redeemer_initialized: bool) -> str:
     """Format redemption system status."""
     if not redeemer_initialized:
         return (
-            "<b>&#128176; Redemption Status</b>\n\n"
+            "\U0001f4b0  <b>Redemption Status</b>\n\n"
             "Redeemer not initialized.\n"
-            "Set POLYGON_RPC_URL to enable on-chain redemption."
+            "Set <code>POLYGON_RPC_URL</code> to enable on-chain redemption."
         )
 
     total = stats.get("total_redeemed", 0)
@@ -917,17 +876,19 @@ def format_redeem_status(stats: dict, redeemer_initialized: bool) -> str:
         scan_str = "Never"
 
     return (
-        "<b>&#128176; Redemption Status</b>\n\n"
-        f"Status: &#9989; Active\n"
-        f"Session redeemed: {total} positions\n"
-        f"Session USDC: ${total_usdc:.4f}\n"
-        f"Last scan: {scan_str}"
+        "\U0001f4b0  <b>Redemption Status</b>\n\n"
+        "<code>"
+        f"Status           \u2705 Active\n"
+        f"Redeemed         {total} positions\n"
+        f"Session USDC     ${total_usdc:.4f}\n"
+        f"Last Scan        {scan_str}"
+        "</code>"
     )
 
 
 def format_redeem_error(error: str) -> str:
     """Format a redemption error message."""
     return (
-        "<b>&#10060; Redemption Error</b>\n\n"
-        f"{_escape_html(error)}"
+        f"\u274c  <b>Redemption Error</b>\n\n"
+        f"<code>{_escape_html(error)}</code>"
     )
