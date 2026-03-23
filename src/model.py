@@ -54,6 +54,8 @@ class PredictionModel:
         # Pending model state for interactive retrain comparison
         self._pending_model: Optional[XGBClassifier] = None
         self._pending_metrics: Optional[dict] = None
+        # One-shot flag: when True, next train() call forces Optuna tuning
+        self._force_tune: bool = False
 
     def _get_xgb_params(self) -> dict:
         """Return the best known XGBoost params (Optuna-tuned or defaults)."""
@@ -177,16 +179,38 @@ class PredictionModel:
 
         self.best_xgb_params = best
         self.last_tune_time = datetime.now(timezone.utc)
+        # Auto-reset the one-shot force-tune flag after successful tuning
+        self._force_tune = False
         return best
 
     def needs_tuning(self) -> bool:
-        """Check if hyperparameters need re-tuning."""
+        """Check if hyperparameters need re-tuning.
+
+        Returns True when:
+        - _force_tune flag is set (from /forcetune command), OR
+        - enable_optuna_tuning is on AND the tune interval has elapsed.
+
+        The _force_tune flag bypasses both the enable check and the timer
+        so that /forcetune works even if scheduled tuning is disabled.
+        """
+        if self._force_tune:
+            return True
         if not self.config.enable_optuna_tuning:
             return False
         if self.last_tune_time is None:
             return True
         elapsed = (datetime.now(timezone.utc) - self.last_tune_time).total_seconds()
         return elapsed > self.config.optuna_tune_interval_hours * 3600
+
+    def force_tune(self) -> None:
+        """Set the one-shot force-tune flag.
+
+        The next call to train() or train_for_comparison() will run
+        Optuna tuning regardless of the normal timer.  The flag is
+        automatically cleared after tune_hyperparameters() completes.
+        """
+        self._force_tune = True
+        logger.info("Force-tune flag set — next training run will include Optuna tuning")
 
     def train(
         self,

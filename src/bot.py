@@ -103,6 +103,7 @@ class SignalBot:
             status_cb=self._get_status_text,
             retrain_cb=self._interactive_retrain,
             retrain_decision_cb=self._handle_retrain_decision,
+            forcetune_cb=self._interactive_forcetune,
             autotrade_toggle_cb=self._toggle_autotrade,
             set_amount_cb=self._set_trade_amount,
             balance_cb=self._get_balance_text,
@@ -683,6 +684,17 @@ class SignalBot:
         except Exception as e:
             logger.error(f"Interactive retrain error: {e}", exc_info=True)
             return formatters.format_retrain_failed(str(e))
+
+    async def _interactive_forcetune(self):
+        """Interactive force-tune for /forcetune command.
+
+        Sets the one-shot force-tune flag on the model so that
+        Optuna tuning runs regardless of the 24h timer, then
+        delegates to the same interactive retrain flow (comparison
+        UI with Keep/Swap buttons).
+        """
+        self.model.force_tune()
+        return await self._interactive_retrain()
 
     async def _handle_retrain_decision(self, decision: str) -> str:
         """Handle user's Keep/Swap decision from inline keyboard.

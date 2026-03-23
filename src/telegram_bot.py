@@ -52,6 +52,7 @@ _BOT_COMMANDS = [
     BotCommand("recent", "Last 10 signals with outcomes"),
     BotCommand("status", "Bot status & model info"),
     BotCommand("retrain", "Force model retrain now"),
+    BotCommand("forcetune", "Force Optuna tuning + retrain"),
     BotCommand("autotrade", "Toggle Polymarket auto-trading"),
     BotCommand("setamount", "Set trade amount (e.g. /setamount 2.50)"),
     BotCommand("balance", "Check Polymarket USDC balance"),
@@ -73,6 +74,7 @@ class TelegramBot:
         self._status_callback: Optional[Callable[[], Awaitable[str]]] = None
         self._retrain_callback: Optional[Callable[[], Awaitable[str]]] = None
         self._retrain_decision_callback: Optional[Callable[[str], Awaitable[str]]] = None
+        self._forcetune_callback: Optional[Callable[[], Awaitable[str]]] = None
         # Polymarket callbacks
         self._autotrade_toggle_callback: Optional[Callable[[], Awaitable[str]]] = None
         self._set_amount_callback: Optional[Callable[[float], Awaitable[str]]] = None
@@ -87,6 +89,7 @@ class TelegramBot:
         status_cb: Optional[Callable[[], Awaitable[str]]] = None,
         retrain_cb: Optional[Callable[[], Awaitable[str]]] = None,
         retrain_decision_cb: Optional[Callable[[str], Awaitable[str]]] = None,
+        forcetune_cb: Optional[Callable[[], Awaitable[str]]] = None,
         autotrade_toggle_cb: Optional[Callable[[], Awaitable[str]]] = None,
         set_amount_cb: Optional[Callable[[float], Awaitable[str]]] = None,
         balance_cb: Optional[Callable[[], Awaitable[str]]] = None,
@@ -100,6 +103,7 @@ class TelegramBot:
         self._status_callback = status_cb
         self._retrain_callback = retrain_cb
         self._retrain_decision_callback = retrain_decision_cb
+        self._forcetune_callback = forcetune_cb
         self._autotrade_toggle_callback = autotrade_toggle_cb
         self._set_amount_callback = set_amount_cb
         self._balance_callback = balance_cb
@@ -127,6 +131,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("recent", self._cmd_recent))
         self.application.add_handler(CommandHandler("status", self._cmd_status))
         self.application.add_handler(CommandHandler("retrain", self._cmd_retrain))
+        self.application.add_handler(CommandHandler("forcetune", self._cmd_forcetune))
         # Polymarket commands
         self.application.add_handler(CommandHandler("autotrade", self._cmd_autotrade))
         self.application.add_handler(CommandHandler("setamount", self._cmd_setamount))
@@ -326,6 +331,44 @@ class TelegramBot:
         else:
             await update.message.reply_text(
                 "\U0001f504 Retrain not available.", parse_mode="HTML"
+            )
+
+    async def _cmd_forcetune(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /forcetune command — force Optuna tuning + interactive retrain."""
+        await update.message.reply_text(
+            formatters.format_forcetune_started(),
+            parse_mode="HTML",
+        )
+        if self._forcetune_callback:
+            result = await self._forcetune_callback()
+            if isinstance(result, dict):
+                # Interactive mode: got comparison data, show with inline buttons
+                text = result.get("message", "Retrain complete.")
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🛡️  Keep Old Model",
+                            callback_data="retrain_keep",
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "✅  Swap to New Model",
+                            callback_data="retrain_swap",
+                        ),
+                    ],
+                ])
+                await update.message.reply_text(
+                    text,
+                    parse_mode="HTML",
+                    reply_markup=keyboard,
+                )
+            else:
+                # Fallback: plain text response (error or first model)
+                await update.message.reply_text(str(result), parse_mode="HTML")
+        else:
+            await update.message.reply_text(
+                "🔄 Force tune not available.", parse_mode="HTML"
             )
 
     async def _handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

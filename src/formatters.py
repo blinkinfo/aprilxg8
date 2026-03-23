@@ -449,7 +449,8 @@ def format_help() -> str:
         "<code>/stats           Full performance dashboard\n"
         "/recent          Last 10 signals with results\n"
         "/status          Bot &amp; model info\n"
-        "/retrain         Force model retraining</code>",
+        "/retrain         Force model retraining\n"
+        "/forcetune       Force Optuna tuning + retrain</code>",
         "",
         "\U0001f4b0 <b>Trading</b>",
         "<code>/autotrade       Toggle auto-trading ON/OFF\n"
@@ -586,6 +587,15 @@ def format_shutdown() -> str:
 def format_retrain_started() -> str:
     """Format retrain-in-progress message."""
     return "\U0001f504  <b>Retraining model...</b>\nThis may take a few minutes."
+
+
+def format_forcetune_started() -> str:
+    """Format force-tune in-progress message."""
+    return (
+        "\U0001f9ec  <b>Force Optuna tuning + retrain...</b>\n"
+        "Running 40 Optuna trials then retraining.\n"
+        "This may take several minutes."
+    )
 
 
 def format_retrain_complete(accuracy: float) -> str:
