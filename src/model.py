@@ -51,6 +51,9 @@ class PredictionModel:
         self.val_logloss: float = 1.0
         self.train_samples: int = 0
         self.best_xgb_params: Optional[dict] = None  # Optuna-tuned params
+        # Pending model state for interactive retrain comparison
+        self._pending_model: Optional[XGBClassifier] = None
+        self._pending_metrics: Optional[dict] = None
 
     def _get_xgb_params(self) -> dict:
         """Return the best known XGBoost params (Optuna-tuned or defaults)."""
@@ -341,6 +344,172 @@ class PredictionModel:
         metrics["top_features"] = {f: float(i) for f, i in top_features}
 
         return metrics
+
+    def train_for_comparison(
+        self,
+        df_5m: pd.DataFrame,
+        higher_tf_data: Optional[dict[str, pd.DataFrame]] = None,
+    ) -> dict:
+        """Train a candidate model and store it as pending WITHOUT swapping.
+
+        Returns comparison metrics so the user can decide whether to
+        keep the current model or swap to the new one.
+
+        Args:
+            df_5m: 5-minute OHLCV DataFrame
+            higher_tf_data: Optional higher timeframe data
+
+        Returns:
+            Dict with old vs new metrics for comparison display
+        """
+        logger.info(f"Training candidate model on {len(df_5m)} candles (comparison mode)...")
+
+        # Create labels before computing features
+        labels = self.feature_engineer.create_labels(df_5m)
+        features_df = self.feature_engineer.compute_features(df_5m, higher_tf_data)
+
+        if features_df.empty:
+            raise ValueError("Feature computation returned empty DataFrame")
+
+        min_len = min(len(features_df), len(labels))
+        features_df = features_df.iloc[:min_len]
+        labels = labels.iloc[:min_len]
+
+        valid_idx = features_df.dropna().index.intersection(labels.dropna().index)
+        X = features_df.loc[valid_idx]
+        y = labels.loc[valid_idx]
+
+        if len(X) < 200:
+            raise ValueError(f"Insufficient training data: {len(X)} samples (need >= 200)")
+
+        self.feature_names = list(X.columns)
+        logger.info(f"Comparison training with {len(X)} samples, {len(self.feature_names)} features")
+
+        if self.needs_tuning():
+            self.tune_hyperparameters(X, y)
+
+        xgb_params = self._get_xgb_params()
+
+        # Time series CV
+        tscv = TimeSeriesSplit(n_splits=5)
+        cv_scores = []
+        for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
+            X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+            y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+            fold_model = XGBClassifier(**xgb_params)
+            fold_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+            val_pred = fold_model.predict(X_val)
+            cv_scores.append(accuracy_score(y_val, val_pred))
+
+        avg_cv = np.mean(cv_scores)
+
+        # Train final candidate on 80/20 split
+        split_idx = int(len(X) * 0.8)
+        X_train_final = X.iloc[:split_idx]
+        y_train_final = y.iloc[:split_idx]
+        X_val_final = X.iloc[split_idx:]
+        y_val_final = y.iloc[split_idx:]
+
+        candidate = XGBClassifier(**xgb_params)
+        candidate.fit(
+            X_train_final, y_train_final,
+            eval_set=[(X_val_final, y_val_final)],
+            verbose=False,
+        )
+
+        train_pred = candidate.predict(X_train_final)
+        val_pred = candidate.predict(X_val_final)
+        val_proba = candidate.predict_proba(X_val_final)[:, 1]
+
+        new_train_acc = accuracy_score(y_train_final, train_pred)
+        new_val_acc = accuracy_score(y_val_final, val_pred)
+        new_val_logloss = log_loss(y_val_final, val_proba)
+
+        # Store as pending (do NOT swap yet)
+        self._pending_model = candidate
+        self._pending_metrics = {
+            "train_accuracy": new_train_acc,
+            "val_accuracy": new_val_acc,
+            "cv_accuracy": avg_cv,
+            "cv_scores": cv_scores,
+            "val_logloss": new_val_logloss,
+            "train_samples": len(X_train_final),
+            "val_samples": len(X_val_final),
+            "total_samples": len(X),
+            "n_features": len(self.feature_names),
+            "optuna_tuned": self.best_xgb_params is not None,
+        }
+
+        # Build comparison result
+        comparison = {
+            "old_val_accuracy": self.val_accuracy,
+            "old_train_accuracy": self.train_accuracy,
+            "old_val_logloss": self.val_logloss,
+            "old_train_samples": self.train_samples,
+            "new_val_accuracy": new_val_acc,
+            "new_train_accuracy": new_train_acc,
+            "new_val_logloss": new_val_logloss,
+            "new_cv_accuracy": avg_cv,
+            "new_total_samples": len(X),
+            "new_n_features": len(self.feature_names),
+            "improvement": new_val_acc - self.val_accuracy,
+            "optuna_tuned": self.best_xgb_params is not None,
+            "has_existing_model": self.model is not None,
+        }
+
+        logger.info(
+            f"Candidate ready: new_val_acc={new_val_acc:.4f} vs "
+            f"current={self.val_accuracy:.4f} (delta={comparison['improvement']:+.4f})"
+        )
+        return comparison
+
+    def apply_pending_model(self) -> dict:
+        """Swap the pending candidate model into production.
+
+        Returns:
+            Dict with the applied model's metrics
+        """
+        if self._pending_model is None or self._pending_metrics is None:
+            raise RuntimeError("No pending model to apply")
+
+        metrics = self._pending_metrics
+        self.model = self._pending_model
+        self.train_accuracy = metrics["train_accuracy"]
+        self.val_accuracy = metrics["val_accuracy"]
+        self.val_logloss = metrics["val_logloss"]
+        self.train_samples = metrics["total_samples"]
+        self.last_train_time = datetime.now(timezone.utc)
+
+        # Clear pending state
+        self._pending_model = None
+        self._pending_metrics = None
+
+        logger.info(f"Pending model applied: val_acc={self.val_accuracy:.4f}")
+        return {
+            "action": "swap",
+            "val_accuracy": self.val_accuracy,
+            "train_accuracy": self.train_accuracy,
+            "val_logloss": self.val_logloss,
+        }
+
+    def reject_pending_model(self) -> dict:
+        """Discard the pending candidate model and keep the current one.
+
+        Returns:
+            Dict confirming the kept model's metrics
+        """
+        old_pending = self._pending_metrics
+        self._pending_model = None
+        self._pending_metrics = None
+        # Still update train time to avoid immediate re-trigger
+        self.last_train_time = datetime.now(timezone.utc)
+
+        logger.info(f"Pending model rejected, keeping val_acc={self.val_accuracy:.4f}")
+        return {
+            "action": "keep",
+            "val_accuracy": self.val_accuracy,
+            "rejected_val_accuracy": old_pending["val_accuracy"] if old_pending else 0.0,
+        }
 
     def predict(self, df_5m: pd.DataFrame, higher_tf_data: Optional[dict[str, pd.DataFrame]] = None) -> dict:
         """Make a prediction for the next candle.

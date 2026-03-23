@@ -603,6 +603,111 @@ def format_retrain_failed(error: str) -> str:
 
 
 # ============================================================
+# INTERACTIVE RETRAIN COMPARISON
+# ============================================================
+
+def format_retrain_comparison(comparison: dict) -> str:
+    """Format old-vs-new model comparison for interactive retrain.
+
+    Args:
+        comparison: Dict from model.train_for_comparison() with
+                    old_* and new_* metrics plus improvement.
+
+    Returns:
+        HTML-formatted comparison message shown with Keep/Swap buttons.
+    """
+    old_acc = comparison.get("old_val_accuracy", 0)
+    new_acc = comparison.get("new_val_accuracy", 0)
+    improvement = comparison.get("improvement", 0)
+    new_cv = comparison.get("new_cv_accuracy", 0)
+    old_logloss = comparison.get("old_val_logloss", 0)
+    new_logloss = comparison.get("new_val_logloss", 0)
+    samples = comparison.get("new_total_samples", 0)
+    n_features = comparison.get("new_n_features", 0)
+    optuna = comparison.get("optuna_tuned", False)
+    has_existing = comparison.get("has_existing_model", False)
+
+    if improvement > 0:
+        delta_icon = "\U0001f7e2"  # green circle
+    elif improvement < 0:
+        delta_icon = "\U0001f534"  # red circle
+    else:
+        delta_icon = "\u26aa"     # white circle
+
+    params_str = "Optuna" if optuna else "Default"
+
+    lines = [
+        "\U0001f504  <b>RETRAIN COMPARISON</b>",
+        "",
+        "<code>",
+    ]
+
+    if has_existing:
+        lines.append(f"           Old       New")
+        lines.append(f"Val Acc    {old_acc:.1%}     {new_acc:.1%}  {delta_icon} {improvement:+.1%}")
+        lines.append(f"Log Loss   {old_logloss:.4f}    {new_logloss:.4f}")
+    else:
+        lines.append(f"Val Acc    {new_acc:.1%}  (first model)")
+        lines.append(f"Log Loss   {new_logloss:.4f}")
+
+    lines.append(f"CV Acc     {new_cv:.1%}")
+    lines.append(f"Samples    {samples:,}")
+    lines.append(f"Features   {n_features}")
+    lines.append(f"Params     {params_str}")
+    lines.append("</code>")
+    lines.append("")
+    lines.append("Choose an action below:")
+
+    return "\n".join(lines)
+
+
+def format_retrain_decision(result: dict) -> str:
+    """Format the outcome after user clicks Keep or Swap.
+
+    Args:
+        result: Dict from model.apply_pending_model() or
+                model.reject_pending_model().
+
+    Returns:
+        HTML string appended below the comparison message.
+    """
+    action = result.get("action", "unknown")
+
+    if action == "swap":
+        acc = result.get("val_accuracy", 0)
+        return (
+            f"\u2705  <b>Model swapped</b>\n"
+            f"Active accuracy  <code>{acc:.1%}</code>"
+        )
+    elif action == "keep":
+        acc = result.get("val_accuracy", 0)
+        rejected = result.get("rejected_val_accuracy", 0)
+        return (
+            f"\U0001f6e1\ufe0f  <b>Old model kept</b>\n"
+            f"Active accuracy  <code>{acc:.1%}</code>\n"
+            f"Rejected candidate  <code>{rejected:.1%}</code>"
+        )
+    else:
+        return "\u26a0\ufe0f  Unknown retrain decision."
+
+
+def format_retrain_result(result: dict) -> str:
+    """Format retrain result when there is no existing model (auto-apply).
+
+    Args:
+        result: Dict from model.apply_pending_model().
+
+    Returns:
+        HTML-formatted message confirming the new model is active.
+    """
+    acc = result.get("val_accuracy", 0)
+    return (
+        f"\u2705  <b>Model trained and activated</b>\n"
+        f"Accuracy  <code>{acc:.1%}</code>"
+    )
+
+
+# ============================================================
 # TRAINING FAILED
 # ============================================================
 

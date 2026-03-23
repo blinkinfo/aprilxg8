@@ -101,7 +101,8 @@ class SignalBot:
             stats_cb=self._get_stats_text,
             recent_cb=self._get_recent_text,
             status_cb=self._get_status_text,
-            retrain_cb=self._retrain_model,
+            retrain_cb=self._interactive_retrain,
+            retrain_decision_cb=self._handle_retrain_decision,
             autotrade_toggle_cb=self._toggle_autotrade,
             set_amount_cb=self._set_trade_amount,
             balance_cb=self._get_balance_text,
@@ -632,11 +633,80 @@ class SignalBot:
         )
 
     async def _retrain_model(self) -> str:
+        """Legacy retrain (used by scheduled retrains). Returns plain text."""
         try:
             await self._train_model()
             return formatters.format_retrain_complete(self.model.val_accuracy)
         except Exception as e:
             return formatters.format_retrain_failed(str(e))
+
+    async def _interactive_retrain(self):
+        """Interactive retrain for /retrain command.
+
+        Returns a dict with 'message' key (comparison HTML) when a
+        pending model is ready for user decision, or a plain string
+        on error / when there is no existing model to compare against.
+        """
+        try:
+            train_candles = self.config.model.train_candles
+            logger.info(f"Interactive retrain: fetching {train_candles} 5m candles...")
+
+            df_5m = await self.fetcher.fetch_historical_klines(
+                interval="5m",
+                total_candles=train_candles,
+            )
+            if df_5m.empty or len(df_5m) < 500:
+                return formatters.format_retrain_failed(
+                    f"Insufficient data: {len(df_5m)} candles"
+                )
+
+            higher_tf = await self.fetcher.fetch_historical_multi_timeframe(
+                intervals=["15m", "1h"],
+                train_candles_5m=train_candles,
+            )
+            higher_tf = {k: v for k, v in higher_tf.items() if not v.empty}
+
+            comparison = self.model.train_for_comparison(df_5m, higher_tf)
+
+            if not comparison.get("has_existing_model"):
+                # No existing model -- auto-apply the candidate
+                result = self.model.apply_pending_model()
+                self.model.save(self.config.model_dir)
+                return formatters.format_retrain_result(result)
+
+            # Has existing model -- show comparison with Keep/Swap buttons
+            return {
+                "message": formatters.format_retrain_comparison(comparison),
+                "comparison": comparison,
+            }
+
+        except Exception as e:
+            logger.error(f"Interactive retrain error: {e}", exc_info=True)
+            return formatters.format_retrain_failed(str(e))
+
+    async def _handle_retrain_decision(self, decision: str) -> str:
+        """Handle user's Keep/Swap decision from inline keyboard.
+
+        Args:
+            decision: 'swap' or 'keep'
+
+        Returns:
+            HTML-formatted result string.
+        """
+        try:
+            if decision == "swap":
+                result = self.model.apply_pending_model()
+                self.model.save(self.config.model_dir)
+            else:
+                result = self.model.reject_pending_model()
+            return formatters.format_retrain_decision(result)
+        except Exception as e:
+            logger.error(f"Retrain decision error: {e}", exc_info=True)
+            return formatters.format_retrain_failed(str(e))
+
+    def _pending_comparison(self) -> bool:
+        """Check if there is a pending model awaiting user decision."""
+        return self.model._pending_model is not None
 
     # --- Polymarket callback methods ---
 

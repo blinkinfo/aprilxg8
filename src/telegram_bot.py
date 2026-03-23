@@ -17,15 +17,19 @@ Polymarket commands:
 - /balance — Fetch Polymarket USDC wallet balance
 - /positions — Show current open positions
 - /pmstatus — Full Polymarket connection status
+
+Interactive retrain:
+- /retrain shows comparison stats with inline Keep/Swap buttons
 """
 import asyncio
 import logging
 from typing import Optional, Callable, Awaitable
 
-from telegram import Update, Bot, BotCommand
+from telegram import Update, Bot, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import Conflict, TimedOut, NetworkError
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
 )
@@ -68,6 +72,7 @@ class TelegramBot:
         self._recent_callback: Optional[Callable[[], str]] = None
         self._status_callback: Optional[Callable[[], Awaitable[str]]] = None
         self._retrain_callback: Optional[Callable[[], Awaitable[str]]] = None
+        self._retrain_decision_callback: Optional[Callable[[str], Awaitable[str]]] = None
         # Polymarket callbacks
         self._autotrade_toggle_callback: Optional[Callable[[], Awaitable[str]]] = None
         self._set_amount_callback: Optional[Callable[[float], Awaitable[str]]] = None
@@ -81,6 +86,7 @@ class TelegramBot:
         recent_cb: Optional[Callable[[], str]] = None,
         status_cb: Optional[Callable[[], Awaitable[str]]] = None,
         retrain_cb: Optional[Callable[[], Awaitable[str]]] = None,
+        retrain_decision_cb: Optional[Callable[[str], Awaitable[str]]] = None,
         autotrade_toggle_cb: Optional[Callable[[], Awaitable[str]]] = None,
         set_amount_cb: Optional[Callable[[float], Awaitable[str]]] = None,
         balance_cb: Optional[Callable[[], Awaitable[str]]] = None,
@@ -93,6 +99,7 @@ class TelegramBot:
         self._recent_callback = recent_cb
         self._status_callback = status_cb
         self._retrain_callback = retrain_cb
+        self._retrain_decision_callback = retrain_decision_cb
         self._autotrade_toggle_callback = autotrade_toggle_cb
         self._set_amount_callback = set_amount_cb
         self._balance_callback = balance_cb
@@ -128,6 +135,8 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("pmstatus", self._cmd_pmstatus))
         # Redemption command
         self.application.add_handler(CommandHandler("redeem", self._handle_redeem))
+        # Inline button callback handler (for retrain swap/keep decisions)
+        self.application.add_handler(CallbackQueryHandler(self._handle_callback_query))
 
         await self.application.initialize()
 
@@ -282,15 +291,66 @@ class TelegramBot:
         await update.message.reply_text(text, parse_mode="HTML")
 
     async def _cmd_retrain(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /retrain command — interactive retrain with comparison."""
         await update.message.reply_text(
             formatters.format_retrain_started(),
             parse_mode="HTML",
         )
         if self._retrain_callback:
-            text = await self._retrain_callback()
+            result = await self._retrain_callback()
+            if isinstance(result, dict):
+                # Interactive mode: got comparison data, show with inline buttons
+                text = result.get("message", "Retrain complete.")
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "\U0001f6e1\ufe0f  Keep Old Model",
+                            callback_data="retrain_keep",
+                        ),
+                        InlineKeyboardButton(
+                            "\u2705  Swap to New Model",
+                            callback_data="retrain_swap",
+                        ),
+                    ]
+                ])
+                await update.message.reply_text(
+                    text,
+                    parse_mode="HTML",
+                    reply_markup=keyboard,
+                )
+            else:
+                # Fallback: plain text response (error case)
+                await update.message.reply_text(str(result), parse_mode="HTML")
         else:
-            text = "\U0001f504 Retrain not available."
-        await update.message.reply_text(text, parse_mode="HTML")
+            await update.message.reply_text(
+                "\U0001f504 Retrain not available.", parse_mode="HTML"
+            )
+
+    async def _handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle inline keyboard button presses."""
+        query = update.callback_query
+        await query.answer()  # Acknowledge the button press
+
+        data = query.data
+        if data in ("retrain_keep", "retrain_swap"):
+            if self._retrain_decision_callback:
+                decision = "swap" if data == "retrain_swap" else "keep"
+                text = await self._retrain_decision_callback(decision)
+            else:
+                text = "\u26a0\ufe0f Decision handler not available."
+
+            # Edit the original comparison message to show the decision
+            # and remove the inline buttons
+            try:
+                await query.edit_message_text(
+                    text=query.message.text_html + "\n\n" + text,
+                    parse_mode="HTML",
+                )
+            except Exception:
+                # If editing fails (e.g. message too old), send as new message
+                await query.message.reply_text(text, parse_mode="HTML")
+        else:
+            logger.warning(f"Unknown callback query data: {data}")
 
     # --- Polymarket Command Handlers ---
 
