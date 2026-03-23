@@ -1,4 +1,4 @@
-# AprilXG v2 — BTC 5-Min Binary Signal Bot
+# AprilXG V4 — BTC 5-Min Binary Signal Bot
 
 ML-powered signal bot that predicts the direction of 5-minute BTC candles and optionally auto-trades on [Polymarket](https://polymarket.com) BTC Up/Down binary markets.
 
@@ -10,6 +10,7 @@ ML-powered signal bot that predicts the direction of 5-minute BTC candles and op
 4. **Auto-trade (optional)** places a FOK market order on Polymarket for the predicted direction
 5. **30-90 seconds into the next candle**, the bot resolves the signal as WIN or LOSS
 6. **Every 6 hours**, the model retrains on ~150 days of historical data with a quality gate
+7. **Resolved Polymarket positions** are automatically redeemed on-chain for USDC
 
 ### Binary Market Payout
 
@@ -25,9 +26,11 @@ ML-powered signal bot that predicts the direction of 5-minute BTC candles and op
 main.py                  Entry point
 src/
   bot.py                 Main orchestrator (5s loop, timing, signal flow)
+  config.py              4 config dataclasses (MEXC, Model, Telegram,
+                         Polymarket) loaded from env vars
   data_fetcher.py        MEXC API client (OHLCV, multi-TF, paginated history)
-  features.py            50+ features (RSI, MACD, Bollinger, ATR, volume,
-                         multi-TF alignment, regime detection, z-scores)
+  features.py            50+ features (RSI, MACD, Bollinger, ATR, ADX, MFI,
+                         volume, multi-TF alignment, regime detection, z-scores)
   model.py               XGBoost classifier (Optuna tuning, TimeSeriesSplit CV,
                          retrain gate)
   signal_tracker.py      Signal lifecycle (add, resolve, stats, persistence)
@@ -35,11 +38,11 @@ src/
                          positions, slug-based market discovery)
   auto_trader.py         Trade orchestrator (safety checks, balance verify,
                          duplicate prevention, slot-targeted execution)
-  telegram_bot.py        Telegram interface (11 commands, HTML formatting,
+  position_redeemer.py   On-chain position redemption (CTF + NegRisk,
+                         Safe wallet, Polygon)
+  telegram_bot.py        Telegram interface (12 commands, HTML formatting,
                          conflict retry on redeploy)
   formatters.py          Centralized HTML message formatting
-  config.py              4 config dataclasses (Bot, MEXC, Model, Telegram,
-                         Polymarket) loaded from env vars
 ```
 
 ## Signal Pipeline
@@ -52,6 +55,10 @@ src/
        v                         v                      v
   [Resolution]           [Telegram Signal]      [Polymarket FOK Trade]
   (30-90s later)         (formatted HTML)       (slot-targeted market order)
+                                                        |
+                                                        v
+                                                [PositionRedeemer]
+                                                (on-chain USDC claim)
 ```
 
 ## Polymarket Integration
@@ -94,22 +101,37 @@ This prevents the bug where a signal for 16:45-16:50 accidentally trades on the 
 5. Duplicate slot prevention (one trade per slot)
 6. Sufficient USDC balance?
 
+### On-Chain Position Redemption
+
+The bot automatically redeems resolved Polymarket positions on Polygon (chain ID 137):
+
+- Scans the Polymarket Data API for redeemable (resolved) positions
+- Supports both **CTF** (standard) and **NegRisk Adapter** markets
+- **Safe/proxy wallet support** (signature_type=2): wraps calls in `execTransaction`
+- EIP-1559 gas pricing with 30% gas buffer
+- Session-level dedup to avoid re-redeeming
+- Requires a small amount of POL in the EOA wallet for gas (~0.005 POL)
+
 ## Model Details
 
 - **Algorithm:** XGBoost binary classifier
 - **Labels:** `next_candle_close > next_candle_open` (predicting the NEXT candle)
 - **Features:** 50+ engineered features across 3 timeframes
-  - Price action: returns, log returns, candle body/wick ratios
-  - Momentum: RSI (14), MACD, Stochastic %K/%D
-  - Volatility: Bollinger Bands width/position, ATR (14)
-  - Volume: OBV, volume ratio, VWAP deviation
-  - Multi-timeframe: 15m and 1h trend, RSI, momentum aligned to 5m bars
-  - Regime detection: ATR percentile, volatility scoring, high-vol flag
-  - Statistical: Z-scores of price, volume, and returns
+  - Price action: returns (1/3/5/10), log returns, candle body/wick ratios, high/low ratios
+  - Moving averages: EMA(9/21) crossover + slopes, SMA(50) ratio
+  - Momentum: RSI(14), Stochastic RSI, MACD (normalized to % of price), ADX(14), MFI(14)
+  - Volatility: Bollinger Bands (width + %B), ATR(14) normalized, vol ratio (5/20)
+  - Volume: OBV ratio, volume ratio, VWAP deviation
+  - Multi-timeframe: 15m and 1h trend, RSI, momentum aligned to 5m bars via timestamp mapping
+  - Regime detection: ATR percentile, binary high-vol flag, vol expansion/contraction
+  - Statistical: Z-scores of momentum, RSI, volume ratio (rolling window)
+  - Patterns: Higher highs, lower lows, consecutive green/red candles
+  - Lag features: RSI, MACD histogram, and volume ratio at lags 1, 2, 3, 5
 - **Training data:** ~43,200 candles (~150 days), paginated fetch for all timeframes
-- **Validation:** TimeSeriesSplit cross-validation (5 splits)
+- **Validation:** TimeSeriesSplit cross-validation (5 splits for training, 2 splits for Optuna tuning)
 - **Retrain:** Every 6 hours with quality gate (new model must beat old by >= 0.002 accuracy)
-- **Optuna:** 30 hyperparameter trials every 24 hours (depth, learning rate, subsample, etc.)
+- **Optuna:** 40 Bayesian hyperparameter trials every 24 hours with 750s timeout, MedianPruner after 10 startup trials
+- **Persistence:** Model saved as pickle (includes params, feature names, accuracy, tune time)
 
 ## Telegram Commands
 
@@ -126,6 +148,7 @@ This prevents the bug where a signal for 16:45-16:50 accidentally trades on the 
 | `/balance` | Check Polymarket USDC wallet balance |
 | `/positions` | View open Polymarket positions |
 | `/pmstatus` | Full Polymarket connection and config status |
+| `/redeem` | Manually trigger position redemption |
 
 ## Setup
 
@@ -134,6 +157,7 @@ This prevents the bug where a signal for 16:45-16:50 accidentally trades on the 
 - Python 3.11+
 - Telegram bot token (from [@BotFather](https://t.me/BotFather))
 - Polymarket wallet with USDC (optional, for auto-trading)
+- Small amount of POL for gas (optional, for on-chain redemption)
 
 ### Environment Variables
 
@@ -142,28 +166,37 @@ This prevents the bug where a signal for 16:45-16:50 accidentally trades on the 
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
 
+# Trading (optional)
+TRADING_SYMBOL=BTCUSDT                # Default: BTCUSDT
+LOG_LEVEL=INFO                         # DEBUG, INFO, WARNING, ERROR
+
+# Model settings (optional)
+PREDICTION_THRESHOLD=0.52              # Base prediction threshold
+CONFIDENCE_MIN=0.55                    # Minimum confidence to emit signal
+RETRAIN_INTERVAL_HOURS=6               # Hours between retrains
+LOOKBACK_CANDLES=100                   # Recent candles for live feature engineering
+TRAIN_CANDLES=43200                    # ~150 days of 5m candles for training
+RETRAIN_MIN_IMPROVEMENT=0.002          # Quality gate for model swap
+ENABLE_OPTUNA=true                     # Enable hyperparameter tuning
+OPTUNA_TRIALS=40                       # Bayesian optimization trials
+OPTUNA_TIMEOUT=750                     # Optuna timeout in seconds
+
 # Polymarket (optional — enables auto-trading)
 POLYMARKET_PRIVATE_KEY=your_wallet_private_key
 POLYMARKET_FUNDER_ADDRESS=your_funder_address
-POLYMARKET_SIGNATURE_TYPE=2          # Optional, default: 2
+POLYMARKET_SIGNATURE_TYPE=2            # 0 = EOA, 1 = EIP-1271, 2 = Gnosis Safe
 
-# Model tuning (optional)
-TRAIN_CANDLES=43200                   # ~150 days of 5m candles
-CONFIDENCE_MIN=0.55                   # Minimum confidence to emit signal
-RETRAIN_INTERVAL_HOURS=6
-RETRAIN_MIN_IMPROVEMENT=0.002
-ENABLE_OPTUNA=true
-OPTUNA_TRIALS=30
-
-# General
-LOG_LEVEL=INFO
+# Position Redemption (optional — requires POLYMARKET_PRIVATE_KEY)
+POLYGON_RPC_URL=https://polygon-rpc.com   # Use Alchemy/Infura for reliability
+POLYMARKET_AUTO_REDEEM=true                # Enable automatic redemption
+POLYMARKET_REDEEM_INTERVAL=120             # Scan interval in seconds
 ```
 
 ### Local Development
 
 ```bash
-git clone https://github.com/blinkinfo/aprilxg2.git
-cd aprilxg2
+git clone https://github.com/blinkinfo/aprilxg4.git
+cd aprilxg4
 pip install -r requirements.txt
 
 # Set environment variables (or use .env file)
@@ -176,17 +209,18 @@ python main.py
 ### Docker
 
 ```bash
-docker build -t aprilxg2 .
-docker run -d --env-file .env aprilxg2
+docker build -t aprilxg4 .
+docker run -d --env-file .env aprilxg4
 ```
 
 ### Railway Deployment
 
 The bot is designed for Railway with:
-- `Dockerfile` for builds
-- Auto-restart on crash
+- `Dockerfile` for builds (Python 3.11-slim)
+- Auto-restart on crash (max 5 retries)
 - Telegram polling conflict retry (handles redeploys gracefully)
-- Persistent data in `data/` directory (signal history, model, autotrade config)
+- Persistent data in `data/` directory (signal history, autotrade config)
+- Model persistence in `models/` directory
 
 ## Dependencies
 
@@ -200,7 +234,7 @@ httpx==0.28.1           # Async HTTP client
 python-telegram-bot==21.10  # Telegram interface
 python-dotenv==1.0.1    # Env var loading
 py-clob-client>=0.34.6  # Polymarket CLOB API
-web3>=6.14.0            # Ethereum signing
+web3>=6.14.0            # On-chain redemption (Polygon)
 ```
 
 ## License
