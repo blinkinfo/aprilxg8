@@ -469,3 +469,79 @@ class TelegramBot:
             await update.message.reply_text(text, parse_mode="HTML")
         else:
             await update.message.reply_text("Position redemption is not available.", parse_mode="HTML")
+
+    async def _cmd_backtest(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /backtest command — run walk-forward backtest on historical data.
+
+        Usage:
+            /backtest          Run with default 500 candles (~1.7 days)
+            /backtest 1000     Run with 1000 candles (~3.5 days)
+        """
+        if not self._backtest_callback:
+            await update.message.reply_text(
+                "\u26a0\ufe0f Backtest not available.", parse_mode="HTML"
+            )
+            return
+
+        # Parse optional candle count from command arguments
+        n_candles = 500  # default
+        if context.args:
+            try:
+                n_candles = int(context.args[0])
+                if n_candles < 50:
+                    await update.message.reply_text(
+                        "\u26a0\ufe0f Minimum 50 candles. Usage: <code>/backtest 500</code>",
+                        parse_mode="HTML",
+                    )
+                    return
+                if n_candles > 50000:
+                    await update.message.reply_text(
+                        "\u26a0\ufe0f Maximum 50,000 candles. Usage: <code>/backtest 500</code>",
+                        parse_mode="HTML",
+                    )
+                    return
+            except (ValueError, IndexError):
+                await update.message.reply_text(
+                    "\u274c Invalid number. Usage: <code>/backtest 500</code>",
+                    parse_mode="HTML",
+                )
+                return
+
+        days_approx = n_candles * 5 / 1440
+        await update.message.reply_text(
+            f"\u23f3  <b>Starting backtest...</b>\n\n"
+            f"<code>{n_candles:,} candles (~{days_approx:.1f} days)</code>\n"
+            f"This may take a few minutes.",
+            parse_mode="HTML",
+        )
+
+        # Progress callback: sends periodic updates to the chat
+        chat_id = update.effective_chat.id
+        _progress_msg_id = None
+
+        async def _progress(processed: int, total: int, signals: int, wins: int):
+            nonlocal _progress_msg_id
+            text = formatters.format_backtest_progress(processed, total, signals, wins)
+            try:
+                if _progress_msg_id:
+                    # Edit the existing progress message in-place
+                    await self.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=_progress_msg_id,
+                        text=text,
+                        parse_mode="HTML",
+                    )
+                else:
+                    # Send the first progress message and remember its ID
+                    msg = await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        parse_mode="HTML",
+                    )
+                    _progress_msg_id = msg.message_id
+            except Exception:
+                pass  # Don't let progress update errors break the backtest
+
+        # Run the backtest via the callback
+        result_text = await self._backtest_callback(n_candles, _progress)
+        await update.message.reply_text(result_text, parse_mode="HTML")
