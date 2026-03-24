@@ -226,7 +226,6 @@ class FeatureEngineer:
             result = result.dropna()
         else:
             # Legacy behavior: drop all rows with any NaN.
-            # Used only by backtester which manages its own windowing.
             result = result.dropna()
 
         if result.empty:

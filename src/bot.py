@@ -36,7 +36,6 @@ from . import formatters
 from .polymarket_client import PolymarketClient
 from .auto_trader import AutoTrader
 from .position_redeemer import PositionRedeemer
-from .backtester import Backtester
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +110,6 @@ class SignalBot:
             positions_cb=self._get_positions_text,
             pmstatus_cb=self._get_pmstatus_text,
             redeem_cb=self._redeem_positions_text,
-            backtest_cb=self._backtest,
         )
         await self.telegram.start_polling()
 
@@ -797,26 +795,6 @@ class SignalBot:
         except Exception as e:
             logger.error(f"Manual redemption error: {e}")
             return formatters.format_redeem_error(str(e))
-
-
-    async def _backtest(self, n_candles: int, progress_callback=None) -> str:
-        """Callback for /backtest command - run walk-forward backtest.
-
-        Creates an isolated Backtester instance that uses the current frozen
-        model. Does not affect live trading, signal tracker, or auto-trader.
-        """
-        try:
-            backtester = Backtester(
-                model=self.model,
-                fetcher=self.fetcher,
-                config=self.config,
-            )
-            result = await backtester.run(n_candles, progress_callback)
-            return formatters.format_backtest_result(result)
-        except Exception as e:
-            logger.error(f"Backtest callback error: {e}", exc_info=True)
-            safe = str(e)[:200].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            return f"\u274c  <b>Backtest failed</b>\n\n<code>{safe}</code>"
 
 
 async def run_bot():

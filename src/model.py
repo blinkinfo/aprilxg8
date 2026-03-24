@@ -62,7 +62,7 @@ class PredictionModel:
         self.val_accuracy: float = 0.0
         self._model_dir = "models"
         self._n_train_samples: int = 0
-        self.train_end_ts: Optional[datetime] = None  # For backtester OOS detection
+        self.train_end_ts: Optional[datetime] = None  # Tracks end of training data window
 
         # Interactive retrain state (train_for_comparison / apply / reject)
         self._pending_model: Optional[XGBClassifier] = None
