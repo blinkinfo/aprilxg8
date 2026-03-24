@@ -50,6 +50,8 @@ class PredictionModel:
         self.val_accuracy: float = 0.0
         self.val_logloss: float = 1.0
         self.train_samples: int = 0
+        self.train_start_ts: Optional[datetime] = None  # Earliest candle in training set
+        self.train_end_ts: Optional[datetime] = None    # Latest candle in training set
         self.best_xgb_params: Optional[dict] = None  # Optuna-tuned params
         # Pending model state for interactive retrain comparison
         self._pending_model: Optional[XGBClassifier] = None
@@ -330,6 +332,10 @@ class PredictionModel:
             self.val_accuracy = new_val_accuracy
             self.val_logloss = new_val_logloss
             self.train_samples = len(X)
+            # Track training data time range for OOS backtest enforcement
+            if "timestamp" in df_5m.columns:
+                self.train_start_ts = pd.Timestamp(df_5m["timestamp"].iloc[0]).to_pydatetime().replace(tzinfo=timezone.utc) if df_5m["timestamp"].iloc[0] is not None else None
+                self.train_end_ts = pd.Timestamp(df_5m["timestamp"].iloc[-1]).to_pydatetime().replace(tzinfo=timezone.utc) if df_5m["timestamp"].iloc[-1] is not None else None
             self.last_train_time = datetime.now(timezone.utc)
         else:
             # Still update the train time so we don't re-trigger immediately
@@ -478,6 +484,8 @@ class PredictionModel:
             "total_samples": len(X),
             "n_features": len(self.feature_names),
             "optuna_tuned": self.best_xgb_params is not None,
+            "train_start_ts": pd.Timestamp(df_5m["timestamp"].iloc[0]).to_pydatetime().replace(tzinfo=timezone.utc) if "timestamp" in df_5m.columns else None,
+            "train_end_ts": pd.Timestamp(df_5m["timestamp"].iloc[-1]).to_pydatetime().replace(tzinfo=timezone.utc) if "timestamp" in df_5m.columns else None,
         }
 
         # Build comparison result
@@ -521,6 +529,8 @@ class PredictionModel:
         self.val_accuracy = metrics["val_accuracy"]
         self.val_logloss = metrics["val_logloss"]
         self.train_samples = metrics["total_samples"]
+        self.train_start_ts = metrics.get("train_start_ts")
+        self.train_end_ts = metrics.get("train_end_ts")
         self.last_train_time = datetime.now(timezone.utc)
 
         # Clear pending state
@@ -651,6 +661,8 @@ class PredictionModel:
             "val_logloss": self.val_logloss,
             "train_samples": self.train_samples,
             "best_xgb_params": self.best_xgb_params,
+            "train_start_ts": self.train_start_ts,
+            "train_end_ts": self.train_end_ts,
         }
         with open(path, "wb") as f:
             pickle.dump(state, f)
@@ -675,6 +687,8 @@ class PredictionModel:
             self.val_logloss = state.get("val_logloss", 1.0)
             self.train_samples = state["train_samples"]
             self.best_xgb_params = state.get("best_xgb_params")
+            self.train_start_ts = state.get("train_start_ts")
+            self.train_end_ts = state.get("train_end_ts")
             logger.info(f"Model loaded from {path} (val_acc={self.val_accuracy:.4f})")
             return True
         except Exception as e:

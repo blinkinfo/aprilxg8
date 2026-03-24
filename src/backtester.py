@@ -63,6 +63,7 @@ class BacktestSignal:
     pnl: float  # +0.96 or -1.00 or 0.0
     open_price: float
     close_price: float
+    is_oos: bool = True  # True if this signal is on out-of-sample data
 
 
 @dataclass
@@ -112,6 +113,11 @@ class BacktestResult:
     signals: list = field(default_factory=list)
     # Error info
     error: Optional[str] = None
+    # Out-of-sample tracking
+    train_end_ts: Optional[str] = None  # Model's training data cutoff (ISO string)
+    oos_candles: int = 0  # Number of truly out-of-sample candles evaluated
+    in_sample_candles: int = 0  # Number of candles that overlapped with training data
+    oos_warning: Optional[str] = None  # Warning if backtest includes in-sample data
 
 
 class Backtester:
@@ -269,6 +275,47 @@ class Backtester:
         )
 
         # ---------------------------------------------------------------
+        # 2b. Out-of-sample enforcement
+        # ---------------------------------------------------------------
+        # Check if model has training data cutoff info
+        train_end_ts_dt = None
+        oos_start_idx = bt_start_idx  # default: all candles are OOS
+        in_sample_count = 0
+
+        if hasattr(self.model, 'train_end_ts') and self.model.train_end_ts is not None:
+            train_end_ts_dt = self.model.train_end_ts
+            # Find the first candle index AFTER the training cutoff
+            candle_timestamps = df_5m["timestamp"].values
+            for check_idx in range(bt_start_idx, bt_end_idx + 1):
+                candle_ts = pd.Timestamp(candle_timestamps[check_idx])
+                if candle_ts.tzinfo is None:
+                    candle_ts = candle_ts.tz_localize("UTC")
+                train_end_aware = train_end_ts_dt
+                if train_end_aware.tzinfo is None:
+                    from datetime import timezone as tz
+                    train_end_aware = train_end_aware.replace(tzinfo=tz.utc)
+                if candle_ts > train_end_aware:
+                    oos_start_idx = check_idx
+                    break
+            else:
+                # ALL backtest candles are within training data
+                oos_start_idx = bt_end_idx + 1  # no OOS candles
+
+            in_sample_count = max(0, oos_start_idx - bt_start_idx)
+
+            if in_sample_count > 0:
+                logger.warning(
+                    f"Backtest: {in_sample_count} of {actual_bt_candles} candles overlap "
+                    f"with training data (train_end={train_end_ts_dt.isoformat()}). "
+                    f"Only {actual_bt_candles - in_sample_count} are truly out-of-sample."
+                )
+        else:
+            logger.warning(
+                "Backtest: model has no train_end_ts \u2014 cannot verify out-of-sample status. "
+                "Results may include in-sample data and appear inflated."
+            )
+
+        # ---------------------------------------------------------------
         # 3. Walk-forward simulation
         # ---------------------------------------------------------------
         signals: list[BacktestSignal] = []
@@ -366,6 +413,7 @@ class Backtester:
                 open_price=next_open,
                 close_price=next_close,
             )
+            signal.is_oos = (i >= oos_start_idx)
             signals.append(signal)
 
             # --- Progress callback ---
@@ -394,6 +442,8 @@ class Backtester:
             end_ts=end_ts,
             elapsed=time.monotonic() - overall_start,
             fetch_seconds=fetch_seconds,
+            train_end_ts_str=train_end_ts_dt.isoformat() if train_end_ts_dt else None,
+            in_sample_count=in_sample_count,
         )
 
         logger.info(
@@ -402,6 +452,20 @@ class Backtester:
             f"win rate {result.win_rate:.1%}, "
             f"PnL ${result.total_pnl:+.2f}"
         )
+
+        if result.oos_warning:
+            logger.warning(result.oos_warning)
+
+        # Also log OOS-only win rate for comparison
+        oos_signals = [s for s in signals if s.is_oos]
+        if oos_signals:
+            oos_wins = sum(1 for s in oos_signals if s.result == "WIN")
+            oos_decided = sum(1 for s in oos_signals if s.result in ("WIN", "LOSS"))
+            if oos_decided > 0:
+                logger.info(
+                    f"Backtest OOS-only: {oos_wins}/{oos_decided} = "
+                    f"{oos_wins/oos_decided:.1%} win rate"
+                )
 
         return result
 
@@ -415,6 +479,8 @@ class Backtester:
         end_ts: str,
         elapsed: float,
         fetch_seconds: float,
+        train_end_ts_str: str = None,
+        in_sample_count: int = 0,
     ) -> BacktestResult:
         """Compute aggregate statistics from backtest signals."""
         result = BacktestResult(
@@ -507,4 +573,19 @@ class Backtester:
         result.longest_win_streak = max_win_streak
         result.longest_loss_streak = max_loss_streak
 
+
+        # OOS tracking
+        result.train_end_ts = train_end_ts_str
+        result.in_sample_candles = in_sample_count
+        oos_signals = [s for s in signals if s.is_oos]
+        result.oos_candles = len(oos_signals)
+
+        if in_sample_count > 0 and signals:
+            total = len(signals)
+            oos_count = len(oos_signals)
+            result.oos_warning = (
+                f"WARNING: {in_sample_count} candles in this backtest overlap with model training data. "
+                f"Only {oos_count}/{total} signals ({oos_count/total*100:.0f}%) are truly out-of-sample. "
+                f"In-sample results appear inflated. Retrain on older data or wait for new candles to get accurate OOS metrics."
+            )
         return result
