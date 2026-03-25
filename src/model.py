@@ -26,6 +26,12 @@ Improvements (v7 — calibration, EV filtering, feature pruning):
 - Improvement: EV-based trade filtering — only trade when expected value >= threshold.
 - Improvement: Feature pruning — keep top N features by importance, retrain.
 
+Fixes applied (v8 — 3-way split for calibration honesty):
+- Fix: 3-way split INNER(65%)|PURGE|CAL(10%)|PURGE|OOS(10%) replaces 2-way split.
+- Fix: CAL split used for eval_set in pruned model training (was leaking OOS — bug 7).
+- Fix: CAL split used for calibrator fitting (was leaking OOS — bug 2).
+- Fix: OOS is now purely held-out for honest metrics — never seen during training.
+
 Prior improvements preserved:
 - Improvement 2: Confidence filtering — skip low-confidence predictions
 - Improvement 4: Walk-forward retraining gate — only swap model if new one is better
@@ -519,27 +525,37 @@ class PredictionModel:
         feature_names = list(X.columns)
 
         # ----------------------------------------------------------
-        # Split: INNER (70%) | PURGE (20 candles) | OOS (15%) | tail
+        # Split: INNER (65%) | PURGE | CAL (10%) | PURGE | OOS (10%) | tail
+        # CAL is used for eval_set (early stopping) and calibrator fitting.
+        # OOS is purely held-out for honest metrics — never seen during training.
         # ----------------------------------------------------------
-        inner_end = int(n_total * 0.70)
-        oos_start = inner_end + PURGE_GAP
-        oos_end = min(oos_start + int(n_total * 0.15), n_total)
+        inner_end = int(n_total * 0.65)
+        cal_start = inner_end + PURGE_GAP
+        cal_end = min(cal_start + int(n_total * 0.10), n_total)
+        oos_start = cal_end + PURGE_GAP
+        oos_end = min(oos_start + int(n_total * 0.10), n_total)
 
         if oos_start >= n_total or (oos_end - oos_start) < 100:
             logger.warning(
-                f"Dataset too small for proper nested CV "
+                f"Dataset too small for 3-way split "
                 f"(n={n_total}, oos_start={oos_start}). "
-                f"Falling back to simple 80/20 with purge gap."
+                f"Falling back to simple INNER(70%)|PURGE|CAL+OOS(15%) with purge gap."
             )
-            inner_end = int(n_total * 0.80) - PURGE_GAP
-            oos_start = inner_end + PURGE_GAP
+            inner_end = int(n_total * 0.70)
+            cal_start = inner_end + PURGE_GAP
+            # Split remaining evenly between CAL and OOS
+            remaining = n_total - cal_start
+            cal_end = cal_start + remaining // 2
+            oos_start = cal_end + PURGE_GAP
             oos_end = n_total
 
         X_inner, y_inner = X.iloc[:inner_end], y.iloc[:inner_end]
+        X_cal, y_cal = X.iloc[cal_start:cal_end], y.iloc[cal_start:cal_end]
         X_oos, y_oos = X.iloc[oos_start:oos_end], y.iloc[oos_start:oos_end]
 
         logger.info(
             f"Data split: INNER={len(X_inner)} | PURGE={PURGE_GAP} | "
+            f"CAL={len(X_cal)} | PURGE={PURGE_GAP} | "
             f"OOS={len(X_oos)} | Total={n_total}"
         )
 
@@ -556,11 +572,12 @@ class PredictionModel:
         candidate_model.fit(X_inner, y_inner, verbose=False)
 
         # ----------------------------------------------------------
-        # Step 2b: Feature Pruning (v7)
+        # Step 2b: Feature Pruning (v7, v8: use CAL for eval_set)
         # ----------------------------------------------------------
         pruned_feature_names = None
         feature_pruned = False
         X_oos_for_metrics = X_oos  # Default: use full features for OOS metrics
+        X_cal_for_calibration = X_cal  # Default: use full features for calibration
 
         if self.config.enable_feature_pruning:
             importances = candidate_model.feature_importances_
@@ -574,15 +591,17 @@ class PredictionModel:
                 f"(top {top_n} by importance)"
             )
 
-            # Retrain candidate on pruned features
+            # Retrain candidate on pruned features — eval_set uses CAL (not OOS)
             X_inner_pruned = X_inner[pruned_feature_names]
+            X_cal_pruned = X_cal[pruned_feature_names]
             X_oos_pruned = X_oos[pruned_feature_names]
             X_oos_for_metrics = X_oos_pruned
+            X_cal_for_calibration = X_cal_pruned
 
             candidate_model = XGBClassifier(**xgb_params)
             candidate_model.fit(
                 X_inner_pruned, y_inner,
-                eval_set=[(X_oos_pruned, y_oos)],
+                eval_set=[(X_cal_pruned, y_cal)],
                 verbose=False,
             )
         else:
@@ -590,29 +609,29 @@ class PredictionModel:
             pruned_feature_names = list(feature_names)
 
         # ----------------------------------------------------------
-        # Step 2c: Probability Calibration (v7)
+        # Step 2c: Probability Calibration (v7, v8: fit on CAL, not OOS)
         # ----------------------------------------------------------
         calibrator = None
 
         if self.config.enable_calibration:
-            raw_proba_oos = candidate_model.predict_proba(X_oos_for_metrics)[:, 1]  # P(UP)
+            raw_proba_cal = candidate_model.predict_proba(X_cal_for_calibration)[:, 1]  # P(UP)
 
             calibrator = IsotonicRegression(out_of_bounds='clip')
-            calibrator.fit(raw_proba_oos, y_oos)
+            calibrator.fit(raw_proba_cal, y_cal)
 
             # Log calibration quality
-            cal_proba_oos = calibrator.predict(raw_proba_oos)
-            cal_mean = float(np.mean(cal_proba_oos))
-            raw_mean = float(np.mean(raw_proba_oos))
+            cal_proba_fitted = calibrator.predict(raw_proba_cal)
+            cal_mean = float(np.mean(cal_proba_fitted))
+            raw_mean = float(np.mean(raw_proba_cal))
             logger.info(
-                f"Calibration fitted on OOS: raw_mean_prob={raw_mean:.4f}, "
+                f"Calibration fitted on CAL split: raw_mean_prob={raw_mean:.4f}, "
                 f"calibrated_mean_prob={cal_mean:.4f}"
             )
 
         # ----------------------------------------------------------
         # Step 3: Honest OOS validation (Fix F)
         # ----------------------------------------------------------
-        logger.info(f"Validating on truly held-out OOS split ({len(X_oos)} samples)")
+        logger.info(f"Validating on truly held-out OOS split ({len(X_oos)} samples, never used for training/calibration)")
         oos_metrics = self._log_honest_metrics(
             candidate_model, X_oos_for_metrics, y_oos,
             label="OOS-holdout", calibrator=calibrator,
@@ -702,6 +721,7 @@ class PredictionModel:
             "xgb_params": xgb_params,
             "n_total": n_total,
             "n_inner": len(X_inner),
+            "n_cal": len(X_cal),
             "n_oos": len(X_oos),
             "val_accuracy": new_val_accuracy,
             "train_accuracy": train_acc,
@@ -805,7 +825,8 @@ class PredictionModel:
             f"CV mean={result['cv_mean']:.4f} | "
             f"Production train acc={result['train_accuracy']:.4f} | "
             f"Features: {result.get('n_pruned_features', '?')}/{result.get('n_original_features', '?')} | "
-            f"Calibrated: {'yes' if result.get('calibrator') is not None else 'no'}"
+            f"Calibrated: {'yes' if result.get('calibrator') is not None else 'no'} | "
+            f"Split: INNER/CAL/OOS={result['n_inner']}/{result['n_cal']}/{result['n_oos']}"
         )
         logger.info("=" * 60)
 
@@ -827,6 +848,7 @@ class PredictionModel:
             "total_samples": n_total,
             "n_samples": n_total,
             "n_inner": result["n_inner"],
+            "n_cal": result["n_cal"],
             "n_oos": result["n_oos"],
             "purge_gap": PURGE_GAP,
             "optuna_tuned": result["optuna_tuned"],

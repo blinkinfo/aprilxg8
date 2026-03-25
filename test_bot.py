@@ -177,8 +177,8 @@ def test_features(results: TestResults, df_5m, df_15m, df_1h):
 
 
 def test_model(results: TestResults, df_hist, df_15m, df_1h):
-    """Test model training, prediction, confidence filtering, and retraining gate."""
-    print("\n--- Testing Model (v2: Optuna + Gate + Confidence) ---")
+    """Test model training, prediction, confidence filtering, retraining gate, and v8 3-way split."""
+    print("\n--- Testing Model (v2: Optuna + Gate + Confidence + v8 3-way split) ---")
     # Disable Optuna for fast testing, use small data
     config = ModelConfig()
     config.enable_optuna_tuning = False  # Skip Optuna in tests for speed
@@ -196,10 +196,19 @@ def test_model(results: TestResults, df_hist, df_15m, df_1h):
         assert "model_swapped" in metrics, "Missing model_swapped (v2 retraining gate)"
         assert metrics["model_swapped"] is True, "First training should always swap"
         assert metrics["val_accuracy"] > 0.45, f"Val accuracy too low: {metrics['val_accuracy']}"
+        # v8: verify 3-way split fields are present
+        assert "n_cal" in metrics, "Missing n_cal (v8 3-way split)"
+        assert "n_oos" in metrics, "Missing n_oos"
+        assert "n_inner" in metrics, "Missing n_inner"
+        assert metrics["n_cal"] > 0, f"CAL split should have samples, got {metrics['n_cal']}"
+        assert metrics["n_oos"] > 0, f"OOS split should have samples, got {metrics['n_oos']}"
+        assert metrics["n_inner"] > metrics["n_cal"], "INNER should be larger than CAL"
+        assert metrics["n_inner"] > metrics["n_oos"], "INNER should be larger than OOS"
         results.ok(
             f"Model trained: val_acc={metrics['val_accuracy']:.4f}, "
             f"cv_mean={metrics['cv_mean']:.4f}, "
             f"{metrics['n_features']} features, {metrics['total_samples']} samples, "
+            f"split=INNER({metrics['n_inner']})/CAL({metrics['n_cal']})/OOS({metrics['n_oos']}), "
             f"swapped={metrics['model_swapped']}"
         )
 
@@ -991,6 +1000,7 @@ async def run_all_tests():
             print(f"  Val Accuracy:   {metrics['val_accuracy']:.4f}")
             print(f"  CV Mean:        {metrics['cv_mean']:.4f}")
             print(f"  Samples:        {metrics['total_samples']}")
+            print(f"  Split:          INNER={metrics.get('n_inner', '?')} / CAL={metrics.get('n_cal', '?')} / OOS={metrics.get('n_oos', '?')}")
             print(f"  Features:       {metrics['n_features']}")
             print(f"  Feature Pruned: {metrics.get('feature_pruned', False)}")
             print(f"  Calibrated:     {metrics.get('calibrated', False)}")
