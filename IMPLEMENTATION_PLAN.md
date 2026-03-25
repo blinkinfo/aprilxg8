@@ -6,10 +6,28 @@
 > Every AI agent session MUST read this file FIRST, check the status boxes,
 > and work on the NEXT unchecked phase. Do NOT skip phases or reinterpret specs.
 >
+> ## CRITICAL: ONE PHASE PER SESSION — HARD STOP RULE
+>
+> **You MUST work on EXACTLY ONE phase per session. No exceptions.**
+>
+> - Find the first phase with unchecked `[ ]` items — that is YOUR phase.
+> - Complete ALL items in that ONE phase.
+> - After completing that phase: update checkboxes, write session log, commit, and STOP.
+> - Do NOT start the next phase. Do NOT "get ahead". Do NOT even read the next phase's files.
+> - If you finish early, use remaining time to VERIFY your work, not start new work.
+> - The user has strict usage limits. Starting a second phase risks hitting the limit
+>   mid-implementation, leaving broken incomplete code. This is WORSE than doing nothing.
+>
+> **What "STOP" means:** After your phase commit, your final message should be:
+> *"Phase N complete. All validation criteria passed. Committed and pushed.
+> Next session should work on Phase N+1: [brief description]."*
+> Then STOP. Do not continue.
+>
 > After completing work, the agent MUST:
 > 1. Check off completed items with `[x]`
 > 2. Add a `### Session Log` entry at the bottom with what was done
-> 3. Commit with message: `Phase N.X: <description>`
+> 3. Commit with message: `Phase N: <description>`
+> 4. **STOP. Do not proceed to the next phase.**
 
 ---
 
@@ -1012,11 +1030,14 @@ If backtest shows < 55% accuracy:
 > Do NOT continue to the next phase. Do NOT "get a head start." STOP.
 > This prevents exceeding usage limits and ensures review between phases.
 
+- **ONE PHASE PER SESSION. This is non-negotiable.** Complete your phase, commit, and STOP.
 - **Do NOT skip validation criteria.** Each phase must pass ALL checks before moving on.
 - **Do NOT modify files outside the current phase** unless fixing a blocking bug from a prior phase.
 - **Do NOT rename features or change function signatures** from what's specified above.
 - **Do NOT add extra features or models** beyond what's specified. Scope creep kills projects.
+- **Do NOT start the next phase** even if you have "extra time" or think you can squeeze it in.
 - **If a prior phase has a bug**, fix it, add a note in the session log, and re-check its validation criteria.
+- **If you finish early**, verify your work by running tests or re-reading validation criteria — do NOT move ahead.
 
 ### File Reading Order for Each Phase
 
