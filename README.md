@@ -1,98 +1,173 @@
-# AprilXG V4 — BTC 5-Min Binary Signal Bot
+# AprilXG V5 — BTC 5-Min Binary Signal Bot
 
-ML-powered signal bot that predicts the direction of 5-minute BTC candles and optionally auto-trades on [Polymarket](https://polymarket.com) BTC Up/Down binary markets.
+> **Multi-model ensemble** ML bot that predicts the direction of 5-minute BTC candles and optionally auto-trades on [Polymarket](https://polymarket.com) BTC Up/Down binary markets.
 
-## How It Works
+---
+
+## 🚀 Overview
+
+AprilXG V5 is a major upgrade from V4, introducing a **3-model ensemble** with regime-aware weighting, 76 microstructure features, per-regime probability calibration, and a tiered trade frequency system with session risk management.
+
+| Feature | V4 | V5 |
+|---|---|---|
+| Model | Single XGBoost | 3-Model Ensemble (XGBoost + LightGBM + CatBoost) |
+| Features | 50+ | 76 microstructure features across 8 groups |
+| Calibration | Global isotonic | Per-regime (isotonic / Platt / passthrough) |
+| Trade Management | Flat confidence threshold | 3-tier system + session risk modes |
+| Regime Detection | Basic ATR flag | 4-regime classifier (ADX + EMA + ATR) |
+| Retrain Interval | Every 6 hours | Every 2 hours (faster adaptation) |
+| Training Window | ~150 days (~43,200 candles) | ~70 days (~20,000 candles, fresher data) |
+
+---
+
+## 📡 How It Works
 
 1. **~15 seconds before each 5-min candle closes**, the bot fetches multi-timeframe data (5m, 15m, 1h) from MEXC
-2. **XGBoost predicts** whether the **next** candle will close Up or Down
-3. **Signals above 55% confidence** are posted to Telegram; signals >= 60% are marked **STRONG**
-4. **Auto-trade (optional)** places a FOK market order on Polymarket for the predicted direction
-5. **30-90 seconds into the next candle**, the bot resolves the signal as WIN or LOSS
-6. **Every 6 hours**, the model retrains on ~150 days of historical data with a quality gate
-7. **Resolved Polymarket positions** are automatically redeemed on-chain for USDC
+2. **76 features are engineered** via `FeatureEngineV2` across 8 feature groups
+3. **Market regime is detected** (Trending Up, Trending Down, Ranging, Volatile)
+4. **3-model ensemble predicts** the next candle direction with regime-weighted soft voting
+5. **Per-regime calibration** adjusts raw probabilities for reliability
+6. **TradeManager evaluates** the signal against a 3-tier confidence system and session risk mode
+7. **Qualifying signals** are posted to Telegram; optionally auto-traded on Polymarket
+8. **30-90 seconds later**, the signal is resolved as WIN or LOSS
+9. **Every 2 hours**, the ensemble retrains with a quality gate (OOS accuracy >= 53%)
+10. **Resolved Polymarket positions** are automatically redeemed on-chain for USDC
 
-### Binary Market Payout
+---
 
-| Outcome | Amount |
-|---------|--------|
-| Win     | +$0.96 |
-| Loss    | -$1.00 |
-| Breakeven win rate | ~51.04% |
+## 🧠 V5 Ensemble Architecture
 
-## Architecture
+### 🎯 Three Specialized Models
+
+| Model | Algorithm | Training Data | Role |
+|---|---|---|---|
+| **Momentum** | XGBoost | TRENDING regime data only | Captures trend continuation/reversal |
+| **Mean Reversion** | LightGBM | RANGING regime data only | Captures mean-reversion signals |
+| **Microstructure** | CatBoost | ALL data | General-purpose fallback + microstructure patterns |
+
+Each model is independently tuned via **Optuna** (15 trials per model) and **feature-pruned** to the top 25 features.
+
+### 🌐 Regime Detection
+
+The `RegimeDetector` classifies each 5-minute bar into one of four market states:
+
+| Regime | Condition | Description |
+|---|---|---|
+| `TRENDING_UP` | ADX > 25, EMA9 > EMA21 | Strong uptrend |
+| `TRENDING_DOWN` | ADX > 25, EMA9 < EMA21 | Strong downtrend |
+| `RANGING` | ADX < 20 | Low volatility, sideways |
+| `VOLATILE` | ADX 20-25 or ATR spike | High volatility, no clear trend |
+
+### ⚖️ Regime-Weighted Soft Voting
+
+Each regime assigns different weights to the three models:
+
+| Regime | Momentum | Mean Reversion | Microstructure |
+|---|---|---|---|
+| TRENDING_UP | 0.50 | 0.10 | 0.40 |
+| TRENDING_DOWN | 0.50 | 0.10 | 0.40 |
+| RANGING | 0.10 | 0.50 | 0.40 |
+| VOLATILE | 0.25 | 0.25 | 0.50 |
+
+### 📊 Per-Regime Probability Calibration
+
+Instead of a single global calibrator (which collapsed spreads to ~50.4% in V4), V5 fits separate calibrators per regime:
+
+| Samples in CAL Split | Calibrator Type |
+|---|---|
+| >= 100 | Isotonic Regression |
+| 30 - 99 | Platt Scaling (Logistic Regression) |
+| < 30 | Passthrough (no calibration) |
+
+---
+
+## 💹 Trade Management
+
+### 🏆 3-Tier Confidence System
+
+Designed to maintain **70+ trades/day** while preserving signal quality:
+
+| Tier | Threshold | Condition | Description |
+|---|---|---|---|
+| **Tier 1** (High) | `cal_prob >= 0.57` | Always active | Highest conviction |
+| **Tier 2** (Medium) | `cal_prob >= 0.54` | Active in NORMAL + CAUTIOUS | Good conviction |
+| **Tier 3** (Base) | `cal_prob >= 0.52` | NORMAL only, `agreement >= 2` | Model consensus required |
+
+### 🛡️ Session Risk Management
+
+Tracks rolling accuracy over the last 20 decided trades:
+
+| Risk Mode | Trigger | Effect | Duration |
+|---|---|---|---|
+| **NORMAL** | Default | All tiers active | -- |
+| **CAUTIOUS** | Rolling accuracy < 48% | Tier 3 disabled | 30 minutes |
+| **DEFENSIVE** | Rolling accuracy < 42% | Only Tier 1 active | 60 minutes |
+
+---
+
+## 📁 Feature Engine V2
+
+76 normalized features across 8 groups (no raw prices -- all percentage, z-score, or ratio based):
+
+| # | Group | Features | Examples |
+|---|---|---|---|
+| 1 | Price Action Microstructure | 12 | Body ratio, wick ratios, consecutive up/down, candle patterns |
+| 2 | Multi-Scale Momentum | 16 | Returns (1-34 bars), RSI (3/5/8/14), ROC, momentum accel/jerk |
+| 3 | Volatility & Regime | 10 | ATR ratio, Bollinger width/position/squeeze, vol ratio |
+| 4 | Volume Profile | 10 | Volume SMA ratios, VWAP deviation, OBV ROC, MFI |
+| 5 | Order Flow Proxy | 6 | Buy volume ratio, volume delta, CVD, trade intensity |
+| 6 | Trend Indicators | 8 | EMA cross/signal, MACD (5/13), ADX |
+| 7 | Time/Session | 6 | Hour/day cyclical encoding, Asian/US session flags |
+| 8 | Higher Timeframe Context | 8 | 15m + 1h RSI, returns, ATR ratio, trend |
+
+---
+
+## 💻 Training Pipeline
 
 ```
-main.py                  Entry point
-src/
-  bot.py                 Main orchestrator (5s loop, timing, signal flow)
-  config.py              4 config dataclasses (MEXC, Model, Telegram,
-                         Polymarket) loaded from env vars
-  data_fetcher.py        MEXC API client (OHLCV, multi-TF, paginated history)
-  features.py            50+ features (RSI, MACD, Bollinger, ATR, ADX, MFI,
-                         volume, multi-TF alignment, regime detection, z-scores)
-  model.py               XGBoost classifier (Optuna tuning, TimeSeriesSplit CV,
-                         retrain gate)
-  signal_tracker.py      Signal lifecycle (add, resolve, stats, persistence)
-  polymarket_client.py   Polymarket CLOB API (FOK market orders, balance,
-                         positions, slug-based market discovery)
-  auto_trader.py         Trade orchestrator (safety checks, balance verify,
-                         duplicate prevention, slot-targeted execution)
-  position_redeemer.py   On-chain position redemption (CTF + NegRisk,
-                         Safe wallet, Polygon)
-  telegram_bot.py        Telegram interface (12 commands, HTML formatting,
-                         conflict retry on redeploy)
-  formatters.py          Centralized HTML message formatting
+1. Fetch multi-TF OHLCV data from MEXC (5m, 15m, 1h)
+2. Compute 76 features via FeatureEngineV2
+3. Create binary labels: next candle close > open = 1, else 0
+4. Detect regimes on training data
+5. Split: INNER (65%) | PURGE (20 bars) | CAL (10%) | PURGE (20) | OOS (10%)
+6. Train Momentum model (XGBoost) on INNER TRENDING rows
+7. Train Mean Reversion model (LightGBM) on INNER RANGING rows
+8. Train Microstructure model (CatBoost) on ALL INNER rows
+9. Optuna-tune each model independently (15 trials, 300s timeout each)
+10. Feature-prune each model to top 25 features
+11. Calibrate per-regime on CAL split
+12. Evaluate ensemble on OOS split
+13. Quality gate: OOS accuracy >= 53% AND >= old_accuracy - 0.5%
 ```
 
-## Signal Pipeline
+---
 
-```
-[MEXC 5m/15m/1h Data] -> [Feature Engineering] -> [XGBoost Predict]
-       |                                                |
-       |                    UP/DOWN (>= 55% conf)       |
-       |                         |                      |
-       v                         v                      v
-  [Resolution]           [Telegram Signal]      [Polymarket FOK Trade]
-  (30-90s later)         (formatted HTML)       (slot-targeted market order)
-                                                        |
-                                                        v
-                                                [PositionRedeemer]
-                                                (on-chain USDC claim)
-```
+## 🎰 Polymarket Integration
 
-## Polymarket Integration
-
-### Market Discovery
+### 🎯 Market Discovery
 
 BTC 5-min Up/Down markets follow a deterministic slug pattern:
 ```
 btc-updown-5m-{slot_timestamp}
 ```
-where `slot_timestamp = (unix_time // 300) * 300`. The bot looks up the exact market by slug via the Gamma API — no keyword searching needed.
+where `slot_timestamp = (unix_time // 300) * 300`. Markets are looked up by slug via the Gamma API.
 
-### Order Execution — FOK Market Orders
+### 💰 Order Execution -- FOK Market Orders
 
-Orders use **Fill-or-Kill (FOK)** market orders via the `py-clob-client` SDK:
-
-- **Order type:** `MarketOrderArgs` with `OrderType.FOK`
-- **Amount:** USDC to spend (e.g. `1.0` = $1.00)
+- **Order type:** `MarketOrderArgs` with `OrderType.FOK` (Fill-or-Kill)
+- **Amount:** USDC to spend (e.g., `1.0` = $1.00)
 - **Pricing:** SDK auto-calculates optimal price from the order book
-- **Execution:** Fills entirely and immediately, or is rejected — no partial fills, no resting orders
-- **Minimum:** ~$1 USDC (vs 5 shares minimum for limit orders)
+- **Execution:** Fills entirely and immediately, or is rejected
 
-### Slot-Targeted Trading
+### Binary Market Payout
 
-Signals include a `target_slot_ts` (Unix timestamp) that flows through the entire pipeline:
+| Outcome | Amount |
+|---|---|
+| Win | +$0.96 |
+| Loss | -$1.00 |
+| Breakeven Win Rate | ~51.04% |
 
-1. Bot predicts the **next** candle direction at 16:44:45 UTC
-2. Signal targets slot `16:45:00` (ts=1774025100)
-3. Polymarket order placed on market `btc-updown-5m-1774025100`
-4. Safety check verifies the discovered market matches the target slot
-
-This prevents the bug where a signal for 16:45-16:50 accidentally trades on the 16:40-16:45 market.
-
-### Safety Checks (6 layers)
+### 🛡️ Safety Checks (6 Layers)
 
 1. Auto-trading enabled?
 2. Direction is UP or DOWN (not NEUTRAL)?
@@ -101,56 +176,75 @@ This prevents the bug where a signal for 16:45-16:50 accidentally trades on the 
 5. Duplicate slot prevention (one trade per slot)
 6. Sufficient USDC balance?
 
-### On-Chain Position Redemption
+### 🔄 On-Chain Position Redemption
 
-The bot automatically redeems resolved Polymarket positions on Polygon (chain ID 137):
-
-- Scans the Polymarket Data API for redeemable (resolved) positions
+- Scans for redeemable (resolved) positions via the Polymarket Data API
 - Supports both **CTF** (standard) and **NegRisk Adapter** markets
 - **Safe/proxy wallet support** (signature_type=2): wraps calls in `execTransaction`
 - EIP-1559 gas pricing with 30% gas buffer
 - Session-level dedup to avoid re-redeeming
 - Requires a small amount of POL in the EOA wallet for gas (~0.005 POL)
 
-## Model Details
+---
 
-- **Algorithm:** XGBoost binary classifier
-- **Labels:** `next_candle_close > next_candle_open` (predicting the NEXT candle)
-- **Features:** 50+ engineered features across 3 timeframes
-  - Price action: returns (1/3/5/10), log returns, candle body/wick ratios, high/low ratios
-  - Moving averages: EMA(9/21) crossover + slopes, SMA(50) ratio
-  - Momentum: RSI(14), Stochastic RSI, MACD (normalized to % of price), ADX(14), MFI(14)
-  - Volatility: Bollinger Bands (width + %B), ATR(14) normalized, vol ratio (5/20)
-  - Volume: OBV ratio, volume ratio, VWAP deviation
-  - Multi-timeframe: 15m and 1h trend, RSI, momentum aligned to 5m bars via timestamp mapping
-  - Regime detection: ATR percentile, binary high-vol flag, vol expansion/contraction
-  - Statistical: Z-scores of momentum, RSI, volume ratio (rolling window)
-  - Patterns: Higher highs, lower lows, consecutive green/red candles
-  - Lag features: RSI, MACD histogram, and volume ratio at lags 1, 2, 3, 5
-- **Training data:** ~43,200 candles (~150 days), paginated fetch for all timeframes
-- **Validation:** TimeSeriesSplit cross-validation (5 splits for training, 2 splits for Optuna tuning)
-- **Retrain:** Every 6 hours with quality gate (new model must beat old by >= 0.002 accuracy)
-- **Optuna:** 40 Bayesian hyperparameter trials every 24 hours with 750s timeout, MedianPruner after 10 startup trials
-- **Persistence:** Model saved as pickle (includes params, feature names, accuracy, tune time)
+## 📂 Project Structure
 
-## Telegram Commands
+```
+main.py                     Entry point
+Dockerfile                  Docker build (Python 3.11-slim)
+railway.toml                Railway deployment config
+requirements.txt            Python dependencies
+.env.example                Environment variable reference
+
+src/
+  bot.py                    Main orchestrator (5s loop, timing, signal flow)
+  config.py                 5 config dataclasses loaded from env vars
+                            (MEXC, Model, Telegram, Polymarket, Ensemble)
+  data_fetcher.py           MEXC API client (OHLCV, multi-TF, paginated history)
+  ensemble.py               V5 3-model ensemble (XGBoost + LightGBM + CatBoost)
+  features_v2.py            V5 feature engine (76 microstructure features)
+  features.py               V4 feature engine (50+ features, legacy)
+  regime.py                 4-regime market state classifier
+  trade_manager.py          3-tier confidence + session risk management
+  calibration_v2.py         Per-regime probability calibration (isotonic/Platt)
+  model.py                  V4 XGBoost classifier (legacy, used when V5 disabled)
+  signal_tracker.py         Signal lifecycle (add, resolve, stats, persistence)
+  polymarket_client.py      Polymarket CLOB API (FOK orders, balance, positions)
+  auto_trader.py            Trade orchestrator (safety checks, slot-targeted exec)
+  position_redeemer.py      On-chain position redemption (CTF + NegRisk, Polygon)
+  telegram_bot.py           Telegram interface (13 commands, HTML formatting)
+  formatters.py             Centralized HTML message formatting
+
+tests/
+  test_features_v2.py       Feature engine V2 unit tests
+  test_ensemble.py          Ensemble model unit tests
+  test_integration.py       Integration tests
+  helpers.py                Test utilities
+```
+
+---
+
+## 🤖 Telegram Commands
 
 | Command | Description |
-|---------|-------------|
+|---|---|
 | `/start` | Welcome message and chat ID |
 | `/help` | Full command reference |
 | `/stats` | Performance dashboard (W/L, PnL, streaks) |
 | `/recent` | Last 10 signals with outcomes |
 | `/status` | Bot status, model info, uptime |
-| `/retrain` | Force model retrain now |
+| `/retrain` | Force ensemble retrain with inline Keep/Swap buttons |
+| `/forcetune` | Force Optuna hyperparameter tuning |
 | `/autotrade` | Toggle Polymarket auto-trading ON/OFF |
-| `/setamount` | Set trade amount in USDC (e.g. `/setamount 2.50`) |
+| `/setamount` | Set trade amount in USDC (e.g., `/setamount 2.50`) |
 | `/balance` | Check Polymarket USDC wallet balance |
 | `/positions` | View open Polymarket positions |
 | `/pmstatus` | Full Polymarket connection and config status |
 | `/redeem` | Manually trigger position redemption |
 
-## Setup
+---
+
+## ⚙️ Setup
 
 ### Prerequisites
 
@@ -159,84 +253,126 @@ The bot automatically redeems resolved Polymarket positions on Polygon (chain ID
 - Polymarket wallet with USDC (optional, for auto-trading)
 - Small amount of POL for gas (optional, for on-chain redemption)
 
-### Environment Variables
+### 🔑 Environment Variables
+
+See [`.env.example`](.env.example) for the full reference. Key variables:
 
 ```env
-# Required
+# -- Required --
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
 
-# Trading (optional)
-TRADING_SYMBOL=BTCUSDT                # Default: BTCUSDT
-LOG_LEVEL=INFO                         # DEBUG, INFO, WARNING, ERROR
+# -- Trading (Optional) --
+TRADING_SYMBOL=BTCUSDT
+LOG_LEVEL=INFO
 
-# Model settings (optional)
-PREDICTION_THRESHOLD=0.52              # Base prediction threshold
-CONFIDENCE_MIN=0.55                    # Minimum confidence to emit signal
-RETRAIN_INTERVAL_HOURS=6               # Hours between retrains
-LOOKBACK_CANDLES=100                   # Recent candles for live feature engineering
-TRAIN_CANDLES=43200                    # ~150 days of 5m candles for training
-RETRAIN_MIN_IMPROVEMENT=0.002          # Quality gate for model swap
-ENABLE_OPTUNA=true                     # Enable hyperparameter tuning
-OPTUNA_TRIALS=40                       # Bayesian optimization trials
-OPTUNA_TIMEOUT=750                     # Optuna timeout in seconds
+# -- V5 Ensemble (Optional, defaults shown) --
+USE_V5_ENSEMBLE=true              # false = fallback to V4 single XGBoost
+V5_TRAIN_CANDLES=20000            # ~70 days of 5m data
+V5_RETRAIN_HOURS=2                # Retrain every 2 hours
+V5_OPTUNA_TRIALS=15               # Trials per model (3 models x 15 = 45)
+V5_OPTUNA_TIMEOUT=300             # Timeout per model in seconds
+V5_PRUNE_TOP_N=25                 # Top features to keep per model
+V5_TIER1_THRESHOLD=0.57           # High conviction tier
+V5_TIER2_THRESHOLD=0.54           # Medium conviction tier
+V5_TIER3_THRESHOLD=0.52           # Base tier
+V5_TIER3_MIN_AGREEMENT=2          # Minimum model agreement for Tier 3
+V5_MIN_OOS_ACC=0.53               # Quality gate for model swap
+V5_RECENT_WEIGHT=3.0              # Weight multiplier for recent training data
 
-# Polymarket (optional — enables auto-trading)
+# -- Session Risk (Optional) --
+V5_CAUTIOUS_ACCURACY=0.48         # Enter CAUTIOUS below this
+V5_DEFENSIVE_ACCURACY=0.42        # Enter DEFENSIVE below this
+V5_CAUTIOUS_DURATION=30           # Minutes in CAUTIOUS mode
+V5_DEFENSIVE_DURATION=60          # Minutes in DEFENSIVE mode
+V5_ROLLING_WINDOW=20              # Rolling accuracy window size
+
+# -- V4 Model Settings (Optional, used when V5 disabled) --
+RETRAIN_INTERVAL_HOURS=6
+TRAIN_CANDLES=43200
+ENABLE_OPTUNA=true
+OPTUNA_TRIALS=40
+OPTUNA_TIMEOUT=750
+
+# -- Polymarket (Optional -- enables auto-trading) --
 POLYMARKET_PRIVATE_KEY=your_wallet_private_key
 POLYMARKET_FUNDER_ADDRESS=your_funder_address
-POLYMARKET_SIGNATURE_TYPE=2            # 0 = EOA, 1 = EIP-1271, 2 = Gnosis Safe
+POLYMARKET_SIGNATURE_TYPE=2       # 0 = EOA, 1 = EIP-1271, 2 = Gnosis Safe
 
-# Position Redemption (optional — requires POLYMARKET_PRIVATE_KEY)
-POLYGON_RPC_URL=https://polygon-rpc.com   # Use Alchemy/Infura for reliability
-POLYMARKET_AUTO_REDEEM=true                # Enable automatic redemption
-POLYMARKET_REDEEM_INTERVAL=120             # Scan interval in seconds
+# -- Position Redemption (Optional) --
+POLYGON_RPC_URL=https://polygon-rpc.com
+POLYMARKET_AUTO_REDEEM=true
+POLYMARKET_REDEEM_INTERVAL=120
 ```
+
+---
+
+## 🚀 Deployment
 
 ### Local Development
 
 ```bash
-git clone https://github.com/blinkinfo/aprilxg4.git
-cd aprilxg4
+git clone https://github.com/blinkinfo/aprilxg8.git
+cd aprilxg8
 pip install -r requirements.txt
 
-# Set environment variables (or use .env file)
-export TELEGRAM_BOT_TOKEN=...
-export TELEGRAM_CHAT_ID=...
+# Configure environment
+cp .env.example .env
+# Edit .env with your values
 
 python main.py
 ```
 
-### Docker
+### 🐳 Docker
 
 ```bash
-docker build -t aprilxg4 .
-docker run -d --env-file .env aprilxg4
+docker build -t aprilxg8 .
+docker run -d --env-file .env aprilxg8
 ```
 
-### Railway Deployment
+### 🚂 Railway
 
-The bot is designed for Railway with:
-- `Dockerfile` for builds (Python 3.11-slim)
-- Auto-restart on crash (max 5 retries)
+The bot is designed for Railway deployment with:
+- `Dockerfile` for builds (Python 3.11-slim with gcc/g++ for ML libs)
 - Telegram polling conflict retry (handles redeploys gracefully)
 - Persistent data in `data/` directory (signal history, autotrade config)
 - Model persistence in `models/` directory
+- Auto-restart on crash
 
-## Dependencies
+---
 
+## 📦 Dependencies
+
+| Package | Version | Purpose |
+|---|---|---|
+| `xgboost` | 2.1.4 | Momentum model (V5) + V4 classifier |
+| `lightgbm` | 4.6.0 | Mean Reversion model (V5) |
+| `catboost` | 1.2.7 | Microstructure model (V5) |
+| `scikit-learn` | 1.6.1 | Calibration, CV, metrics |
+| `numpy` | 1.26.4 | Numerical computation |
+| `pandas` | 2.2.3 | Data handling |
+| `optuna` | 4.2.1 | Bayesian hyperparameter optimization |
+| `httpx` | 0.28.1 | Async HTTP client (MEXC API) |
+| `python-telegram-bot` | 21.10 | Telegram interface |
+| `python-dotenv` | 1.0.1 | Environment variable loading |
+| `py-clob-client` | >= 0.34.6 | Polymarket CLOB API |
+| `web3` | >= 6.14.0 | On-chain redemption (Polygon) |
+
+---
+
+## 🧪 Testing
+
+```bash
+python -m pytest tests/ -v
 ```
-xgboost==2.1.4          # ML model
-scikit-learn==1.6.1     # Preprocessing, CV
-numpy==1.26.4           # Numerical
-pandas==2.2.3           # Data handling
-optuna==4.2.1           # Hyperparameter optimization
-httpx==0.28.1           # Async HTTP client
-python-telegram-bot==21.10  # Telegram interface
-python-dotenv==1.0.1    # Env var loading
-py-clob-client>=0.34.6  # Polymarket CLOB API
-web3>=6.14.0            # On-chain redemption (Polygon)
-```
 
-## License
+Test suite includes:
+- **Feature Engine V2** -- validates all 76 features compute correctly
+- **Ensemble Model** -- unit tests for training, prediction, save/load
+- **Integration Tests** -- end-to-end pipeline verification
+
+---
+
+## 📜 License
 
 Private repository.
