@@ -525,7 +525,7 @@ class SignalBot:
 
             # Send V5 formatted signal message
             msg = formatters.format_ensemble_signal_message(
-                sig, stats, trade_decision,
+                sig, stats, trade_decision, prediction=prediction,
             )
             await self.telegram.send_message(msg)
 

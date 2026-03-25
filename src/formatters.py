@@ -1032,6 +1032,7 @@ def format_ensemble_signal_message(
     signal,
     tracker_stats,
     trade_decision: dict,
+    prediction: dict = None,
 ) -> str:
     """Format V5 ensemble signal for Telegram.
 
@@ -1086,20 +1087,20 @@ def format_ensemble_signal_message(
     else:
         rolling_str = "N/A (warming up)"
 
-    # Model agreement
-    model_agreement = getattr(signal, "model_agreement", None)
+    # Model agreement (from prediction dict)
+    model_agreement = (prediction or {}).get("model_agreement")
     if model_agreement is not None:
         agreement_str = f"{model_agreement}/3 agree"
     else:
         agreement_str = "N/A"
 
-    # Regime
-    regime_name = getattr(signal, "regime_name", None)
+    # Regime (from prediction dict)
+    regime_name = (prediction or {}).get("regime_name")
     if regime_name is None:
         regime_name = "UNKNOWN"
 
-    # EV calculation
-    ev = getattr(signal, "ev", None)
+    # EV calculation (from prediction dict)
+    ev = (prediction or {}).get("ev")
     if ev is not None:
         ev_str = f"{ev:+.4f}"
         ev_label = "\u2705 Positive" if ev > 0 else "\u274c Negative"
@@ -1116,6 +1117,7 @@ def format_ensemble_signal_message(
     lines = [
         f"{dir_emoji} <b>V5 ENSEMBLE SIGNAL</b> {dir_arrow}",
         "",
+        f"\U0001f552 <b>Candle:</b> {_format_slot(signal.candle_slot_ts) if signal.candle_slot_ts else 'N/A'}",
         f"<b>Direction:</b> {direction}",
         f"<b>Confidence:</b> {confidence:.1%}",
         f"<b>EV:</b> {ev_str} {ev_label}",
