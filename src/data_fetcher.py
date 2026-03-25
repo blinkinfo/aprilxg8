@@ -285,7 +285,7 @@ class MEXCFetcher:
             limit: Number of recent trades (max 1000)
 
         Returns:
-            DataFrame with columns: id, time, price, qty, isBuyerMaker
+            DataFrame with columns: id, price, qty, quoteQty, time, isBuyerMaker
         """
         await self._rate_limit()
         client = await self._get_client()
@@ -316,6 +316,7 @@ class MEXCFetcher:
             df["time"] = pd.to_datetime(df["time"], unit="ms", utc=True)
             df["price"] = df["price"].astype(np.float64)
             df["qty"] = df["qty"].astype(np.float64)
+            df["quoteQty"] = df["price"] * df["qty"]
 
             logger.debug(f"Fetched {len(df)} recent trades")
             return df
