@@ -1079,6 +1079,7 @@ def format_ensemble_signal_message(
         risk_emoji = "\u2705"              # Check
 
     # Rolling accuracy
+    rolling_count = trade_decision.get("rolling_count", 0)
     rolling_acc = trade_decision.get("rolling_accuracy")
     if rolling_acc is not None:
         rolling_str = f"{rolling_acc:.1%}"
@@ -1123,7 +1124,7 @@ def format_ensemble_signal_message(
         f"\U0001f916 <b>Models:</b> {agreement_str}",
         f"{tier_emoji} <b>Tier:</b> {tier_label}",
         f"{risk_emoji} <b>Risk Mode:</b> {risk_mode}",
-        f"\U0001f4ca <b>Rolling Accuracy:</b> {rolling_str}",
+        f"\U0001f4ca <b>Rolling Accuracy:</b> {rolling_str} ({rolling_count} trades)",
         "",
         f"<b>Session:</b> {wins}W / {losses}L ({accuracy:.1%})",
     ]

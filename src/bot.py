@@ -596,6 +596,17 @@ class SignalBot:
 
             if metrics.get("success", False):
                 # Save ensemble
+                # Quality gate: check OOS accuracy meets minimum threshold
+                oos_acc_check = metrics.get("oos_accuracy", 0.0)
+                if oos_acc_check < self.ensemble_config.min_oos_accuracy:
+                    logger.warning(
+                        f"V5 ensemble OOS accuracy {oos_acc_check:.1%} below min threshold {self.ensemble_config.min_oos_accuracy:.1%} -- keeping old model"
+                    )
+                    await self.telegram.send_message(
+                        f"\u26a0\ufe0f V5 Retrain: OOS accuracy {oos_acc_check:.1%} below minimum {self.ensemble_config.min_oos_accuracy:.1%}. Keeping previous model."
+                    )
+                    return
+                
                 os.makedirs(self.ensemble_config.model_dir, exist_ok=True)
                 self.ensemble.save(self.ensemble_config.model_dir)
 
@@ -777,6 +788,9 @@ class SignalBot:
                     stats = self.tracker.get_stats()
                     msg = formatters.format_resolution(resolved, stats)
                     await self.telegram.send_message(msg)
+                    # Update trade manager rolling accuracy
+                    if self.trade_manager and resolved.result in ("WIN", "LOSS"):
+                        self.trade_manager.record_result(resolved.result == "WIN")
 
             if resolved_count > 0:
                 logger.info(f"Resolved {resolved_count} stale signals at startup")

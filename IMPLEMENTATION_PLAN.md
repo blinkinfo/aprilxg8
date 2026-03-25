@@ -1129,3 +1129,18 @@ If backtest shows < 55% accuracy:
 - TradeManager is configured from EnsembleConfig tier thresholds at startup
 - Ensemble loading from disk on startup with graceful fallback to first-cycle training
 
+
+### Session 5 — Phase 4 Verification & Bug Fixes (2026-03-25)
+**Phase completed:** Phase 4 — Verification audit & bug fixes
+**Changes made:**
+- Audited all Phase 4 tasks (4.1-4.8) against the spec
+- FIX 1 (CRITICAL): Added missing `ensemble: EnsembleConfig` field to `BotConfig` in config.py — bot was crashing at startup
+- FIX 2 (MEDIUM): Added `min_oos_accuracy` quality gate in `_train_ensemble()` — ensemble was being saved even with poor OOS accuracy
+- FIX 3 (LOW-MEDIUM): Added `record_result()` call in `_resolve_stale_signals()` — stale resolutions now update rolling accuracy
+- FIX 4 (MINOR): Added trade count to Rolling Accuracy display in formatters.py — now shows "57.5% (20 trades)"
+**Verification results:**
+- All 19 EnsembleConfig fields verified exact match with spec
+- model.py bridge function verified exact match
+- .env.example all 12 V5 variables verified with correct defaults
+- All modified files pass syntax check
+- All Phase 4 checkboxes (4.1-4.8) and validation criteria confirmed [x]

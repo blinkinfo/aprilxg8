@@ -177,6 +177,7 @@ class BotConfig:
     data_dir: str = "data"
     model_dir: str = "models"
     log_level: str = "INFO"
+    ensemble: EnsembleConfig = field(default_factory=EnsembleConfig)
 
     @classmethod
     def from_env(cls) -> "BotConfig":
