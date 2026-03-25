@@ -251,7 +251,13 @@ class EnsembleModel:
                 continue
 
             model = model_cls(**params)
-            model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
+            # XGBoost accepts verbose=False in .fit(); LightGBM does not
+            if model_cls.__name__ == "LGBMClassifier":
+                import lightgbm as lgb
+                model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)],
+                          callbacks=[lgb.log_evaluation(period=0)])
+            else:
+                model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
             preds = model.predict(X_va)
             acc = accuracy_score(y_va, preds)
             fold_scores.append(acc)
@@ -505,7 +511,7 @@ class EnsembleModel:
                 X_ranging, y_ranging, n_trials=n_trials, timeout=optuna_timeout,
             )
             mr_initial = LGBMClassifier(**mr_params)
-            mr_initial.fit(X_ranging, y_ranging, verbose=False)
+            mr_initial.fit(X_ranging, y_ranging)
 
             mr_features = self._prune_features(
                 mr_initial, all_feature_names, top_n=top_n_features,
@@ -514,7 +520,7 @@ class EnsembleModel:
 
             self.mean_reversion_model = LGBMClassifier(**mr_params)
             self.mean_reversion_model.fit(
-                X_ranging[mr_features], y_ranging, verbose=False,
+                X_ranging[mr_features], y_ranging,
             )
             mr_acc = accuracy_score(
                 y_ranging, self.mean_reversion_model.predict(X_ranging[mr_features]),
