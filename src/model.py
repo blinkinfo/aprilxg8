@@ -1172,3 +1172,12 @@ class PredictionModel:
             "has_calibrator": self.calibrator is not None,
             "has_pruned_features": self.pruned_feature_names is not None,
         }
+
+
+# V5 Bridge — allows bot.py to use either V4 or V5 pipeline
+def get_prediction_model(config, use_v5=False):
+    if use_v5:
+        from .ensemble import EnsembleModel
+        return EnsembleModel(config)
+    return PredictionModel(config)
+

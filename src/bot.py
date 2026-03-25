@@ -36,6 +36,10 @@ from . import formatters
 from .polymarket_client import PolymarketClient
 from .auto_trader import AutoTrader
 from .position_redeemer import PositionRedeemer
+# V5 Ensemble imports
+from .ensemble import EnsembleModel
+from .features_v2 import FeatureEngineV2
+from .trade_manager import TradeManager
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +88,32 @@ class SignalBot:
         self.auto_trader = None
         self.position_redeemer = None
         self._last_redeem_check_ts = 0.0
+
+        # V5 Ensemble components
+        self.ensemble_config = config.ensemble
+        self.use_v5 = config.ensemble.use_v5_ensemble
+        self.ensemble: EnsembleModel | None = None
+        self.trade_manager: TradeManager | None = None
+        self.feature_engine_v2: FeatureEngineV2 | None = None
+
+        if self.use_v5:
+            self.ensemble = EnsembleModel(config.model)
+            self.feature_engine_v2 = FeatureEngineV2(config.model)
+            self.trade_manager = TradeManager(config.model)
+            self.trade_manager.configure(
+                tier1_threshold=config.ensemble.tier1_threshold,
+                tier2_threshold=config.ensemble.tier2_threshold,
+                tier3_threshold=config.ensemble.tier3_threshold,
+                tier3_min_agreement=config.ensemble.tier3_min_agreement,
+                cautious_accuracy=config.ensemble.cautious_accuracy_threshold,
+                defensive_accuracy=config.ensemble.defensive_accuracy_threshold,
+                cautious_duration_minutes=config.ensemble.cautious_duration_minutes,
+                defensive_duration_minutes=config.ensemble.defensive_duration_minutes,
+                rolling_window=config.ensemble.rolling_window,
+            )
+            logger.info("V5 Ensemble mode ENABLED — multi-model pipeline active")
+        else:
+            logger.info("V5 Ensemble mode DISABLED — using V4 single-model pipeline")
 
     async def start(self):
         """Start the bot."""
@@ -170,6 +200,18 @@ class SignalBot:
         # Resolve any stale pending signals from previous session
         await self._resolve_stale_signals()
 
+        # V5: Load saved ensemble if available
+        if self.use_v5 and self.ensemble is not None:
+            try:
+                ensemble_path = self.ensemble_config.model_dir
+                if os.path.exists(ensemble_path):
+                    self.ensemble = EnsembleModel.load(ensemble_path, self.config.model)
+                    logger.info(f"V5: Loaded saved ensemble from {ensemble_path}")
+                else:
+                    logger.info("V5: No saved ensemble found — will train on first cycle")
+            except Exception as e:
+                logger.warning(f"V5: Failed to load ensemble: {e} — will retrain")
+
         # Send startup message
         msg = formatters.format_startup(
             model_accuracy=self.model.val_accuracy,
@@ -241,7 +283,18 @@ class SignalBot:
                         self._last_resolved_candle_ts = current_slot
 
                 # --- RETRAIN: check if model needs retraining ---
-                if self.model.needs_retrain():
+                if self.use_v5 and self.ensemble is not None:
+                    # V5 ensemble retrain check
+                    if self.ensemble.last_train_time is None:
+                        # First train
+                        logger.info("V5 Ensemble: initial training starting...")
+                        await self._train_ensemble()
+                    else:
+                        elapsed = (datetime.now(timezone.utc) - self.ensemble.last_train_time).total_seconds()
+                        if elapsed >= self.ensemble_config.retrain_interval_hours * 3600:
+                            logger.info("V5 Ensemble retrain interval reached")
+                            await self._train_ensemble()
+                elif self.model.needs_retrain():
                     logger.info("Model retrain interval reached")
                     await self._train_model()
 
@@ -279,6 +332,11 @@ class SignalBot:
             now: Current UTC datetime
             current_slot: The open timestamp of the current 5-min candle
         """
+        # V5 branch: use ensemble pipeline
+        if self.use_v5 and self.ensemble and self.ensemble.is_trained:
+            await self._run_prediction_cycle_v5(now, current_slot)
+            return
+
         try:
             # Fetch multi-timeframe data
             # Add warm-up buffer for indicator computation (ATR regime uses 100-period
@@ -389,6 +447,182 @@ class SignalBot:
         except Exception as e:
             logger.error(f"Prediction cycle error: {e}", exc_info=True)
 
+
+    async def _run_prediction_cycle_v5(self, now: datetime, current_slot: datetime):
+        """V5 Ensemble prediction cycle.
+
+        Uses multi-model ensemble with trade management tiers.
+        """
+        try:
+            # Fetch multi-timeframe data (same as V4)
+            warmup_buffer = 150
+            fetch_limit = self.config.model.lookback_candles + warmup_buffer
+            data = await self.fetcher.fetch_multi_timeframe(
+                intervals=["5m", "15m", "1h"],
+                limit=fetch_limit,
+            )
+
+            df_5m = data.get("5m")
+            if df_5m is None or df_5m.empty:
+                logger.warning("V5: No 5m data available")
+                return
+
+            higher_tf = {k: v for k, v in data.items() if k != "5m" and not v.empty}
+
+            # Exclude current in-progress candle (same as V4)
+            df_5m_completed = df_5m.iloc[:-1]
+            higher_tf_completed = {}
+            for k, v in higher_tf.items():
+                if not v.empty:
+                    higher_tf_completed[k] = v.iloc[:-1]
+                else:
+                    higher_tf_completed[k] = v
+
+            # Compute V2 features
+            features = self.feature_engine_v2.compute_features(
+                df_5m_completed, higher_tf_completed, ffill=True,
+            )
+            if features.empty:
+                logger.warning("V5: Feature computation returned empty DataFrame")
+                return
+
+            # Get ensemble prediction
+            prediction = self.ensemble.predict(features)
+
+            if prediction is None or prediction.get("signal") not in ("UP", "DOWN"):
+                if prediction is not None:
+                    logger.info(
+                        f"V5: No signal (conf={prediction.get('confidence', 0):.4f}, "
+                        f"ev={prediction.get('ev', 0):.4f})"
+                    )
+                else:
+                    logger.info("V5: Prediction returned None")
+                return
+
+            # Get trade decision from trade manager
+            trade_decision = self.trade_manager.should_trade(prediction)
+
+            # Current price from last completed candle
+            current_price = float(df_5m_completed["close"].iloc[-1])
+            prediction["current_price"] = current_price
+
+            # Compute NEXT candle slot (same as V4)
+            next_slot = current_slot + timedelta(minutes=CANDLE_PERIOD_MINUTES)
+            next_slot_iso = next_slot.isoformat()
+            candle_open_price = 0.0
+
+            # Record signal in tracker (always, regardless of trade decision)
+            sig = self.tracker.add_signal(
+                direction=prediction["signal"],
+                confidence=prediction["confidence"],
+                entry_price=current_price,
+                candle_slot_ts=next_slot_iso,
+                candle_open_price=candle_open_price,
+            )
+
+            # Get stats for formatter
+            stats = self.tracker.get_stats()
+
+            # Send V5 formatted signal message
+            msg = formatters.format_ensemble_signal_message(
+                sig, stats, trade_decision,
+            )
+            await self.telegram.send_message(msg)
+
+            logger.info(
+                f"V5 Signal: {prediction['signal']} "
+                f"conf={prediction['confidence']:.3f} "
+                f"ev={prediction['ev']:.4f} "
+                f"regime={prediction.get('regime_name', '?')} "
+                f"agreement={prediction.get('model_agreement', '?')}/3 "
+                f"tier={trade_decision.get('tier', 'None')} "
+                f"trade={trade_decision['trade']} "
+                f"(next slot={next_slot_iso})"
+            )
+
+            # Auto-trade if trade decision says go AND auto_trader is enabled
+            if trade_decision["trade"] and self.auto_trader and self.auto_trader.enabled:
+                try:
+                    if next_slot.tzinfo is None:
+                        next_slot_aware = next_slot.replace(tzinfo=timezone.utc)
+                    else:
+                        next_slot_aware = next_slot
+                    prediction["target_slot_ts"] = int(next_slot_aware.timestamp())
+
+                    trade_result = await self.auto_trader.execute_trade(prediction)
+                    if trade_result["success"]:
+                        trade_msg = formatters.format_trade_execution(trade_result["data"])
+                        await self.telegram.send_message(trade_msg)
+                    elif trade_result["action"] == "error":
+                        err_msg = formatters.format_trade_error(trade_result["error"])
+                        await self.telegram.send_message(err_msg)
+                except Exception as te:
+                    logger.error(f"V5 Auto-trade error: {te}", exc_info=True)
+                    await self.telegram.send_message(
+                        formatters.format_trade_error(str(te))
+                    )
+
+        except Exception as e:
+            logger.error(f"V5 Prediction cycle error: {e}", exc_info=True)
+
+    async def _train_ensemble(self):
+        """Train or retrain the V5 ensemble model."""
+        try:
+            train_candles = self.ensemble_config.train_candles
+            logger.info(
+                f"V5: Fetching training data: {train_candles} 5m candles "
+                f"(~{train_candles * 5 // 1440} days)..."
+            )
+
+            # Fetch historical 5m data (paginated)
+            df_5m = await self.fetcher.fetch_historical_klines(
+                interval="5m",
+                total_candles=train_candles,
+            )
+
+            if df_5m.empty or len(df_5m) < 500:
+                logger.error(f"V5: Insufficient training data: {len(df_5m)} candles")
+                return
+
+            # Fetch higher TF data
+            higher_tf = await self.fetcher.fetch_historical_multi_timeframe(
+                intervals=["15m", "1h"],
+                train_candles_5m=train_candles,
+            )
+            higher_tf = {k: v for k, v in higher_tf.items() if not v.empty}
+
+            # Train ensemble (async)
+            metrics = await self.ensemble.train(df_5m, higher_tf)
+
+            if metrics.get("success", False):
+                # Save ensemble
+                os.makedirs(self.ensemble_config.model_dir, exist_ok=True)
+                self.ensemble.save(self.ensemble_config.model_dir)
+
+                # Send training complete message
+                oos_acc = metrics.get("oos_accuracy", 0)
+                msg = (
+                    f"\U0001f916 <b>V5 Ensemble Training Complete</b>\n\n"
+                    f"<b>OOS Accuracy:</b> {oos_acc:.1%}\n"
+                    f"<b>Samples:</b> {metrics.get('total_samples', 'N/A')}\n"
+                    f"<b>Models:</b> {metrics.get('models_trained', 'N/A')}\n"
+                    f"<b>Features:</b> {metrics.get('total_features', 'N/A')}\n"
+                )
+                await self.telegram.send_message(msg)
+                logger.info(f"V5 Ensemble training complete — OOS accuracy: {oos_acc:.1%}")
+            else:
+                error = metrics.get("error", "Unknown error")
+                logger.error(f"V5 Ensemble training failed: {error}")
+                await self.telegram.send_message(
+                    f"\u274c <b>V5 Ensemble Training Failed</b>\n{error}"
+                )
+
+        except Exception as e:
+            logger.error(f"V5 Ensemble training error: {e}", exc_info=True)
+            await self.telegram.send_message(
+                f"\u274c <b>V5 Ensemble Training Error</b>\n{str(e)}"
+            )
+
     async def _resolve_pending_signals(self, current_slot: datetime):
         """Resolve pending signals whose predicted candle has fully closed.
 
@@ -467,6 +701,10 @@ class SignalBot:
                     stats = self.tracker.get_stats()
                     msg = formatters.format_resolution(resolved, stats)
                     await self.telegram.send_message(msg)
+
+                    # V5: Feed result to trade manager for rolling accuracy
+                    if self.trade_manager and resolved.result in ("WIN", "LOSS"):
+                        self.trade_manager.record_result(resolved.result == "WIN")
 
         except Exception as e:
             logger.error(f"Signal resolution error: {e}", exc_info=True)

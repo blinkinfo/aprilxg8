@@ -111,6 +111,45 @@ class TelegramConfig:
     max_message_length: int = 4096
 
 
+
+@dataclass
+class EnsembleConfig:
+    """V5 Ensemble configuration."""
+    use_v5_ensemble: bool = field(default_factory=lambda: os.getenv("USE_V5_ENSEMBLE", "true").lower() == "true")
+
+    # Training
+    train_candles: int = field(default_factory=lambda: int(os.getenv("V5_TRAIN_CANDLES", "20000")))  # ~70 days, fresher data
+    retrain_interval_hours: int = field(default_factory=lambda: int(os.getenv("V5_RETRAIN_HOURS", "2")))
+    sample_weight_recent_multiplier: float = field(default_factory=lambda: float(os.getenv("V5_RECENT_WEIGHT", "3.0")))
+    recent_window_frac: float = 0.33  # Last 33% of training data gets weight multiplier
+
+    # Optuna
+    optuna_trials_per_model: int = field(default_factory=lambda: int(os.getenv("V5_OPTUNA_TRIALS", "15")))
+    optuna_timeout_per_model: int = field(default_factory=lambda: int(os.getenv("V5_OPTUNA_TIMEOUT", "300")))
+
+    # Feature pruning
+    feature_prune_top_n: int = field(default_factory=lambda: int(os.getenv("V5_PRUNE_TOP_N", "25")))
+
+    # Trade tiers
+    tier1_threshold: float = field(default_factory=lambda: float(os.getenv("V5_TIER1_THRESHOLD", "0.57")))
+    tier2_threshold: float = field(default_factory=lambda: float(os.getenv("V5_TIER2_THRESHOLD", "0.54")))
+    tier3_threshold: float = field(default_factory=lambda: float(os.getenv("V5_TIER3_THRESHOLD", "0.52")))
+    tier3_min_agreement: int = field(default_factory=lambda: int(os.getenv("V5_TIER3_MIN_AGREEMENT", "2")))
+
+    # Session risk
+    cautious_accuracy_threshold: float = 0.48
+    defensive_accuracy_threshold: float = 0.42
+    cautious_duration_minutes: int = 30
+    defensive_duration_minutes: int = 60
+    rolling_window: int = 20
+
+    # Quality gate
+    min_oos_accuracy: float = field(default_factory=lambda: float(os.getenv("V5_MIN_OOS_ACC", "0.53")))
+
+    # Model save path
+    model_dir: str = field(default_factory=lambda: os.getenv("V5_MODEL_DIR", "data/ensemble_model"))
+
+
 @dataclass
 class PolymarketConfig:
     """Polymarket auto-trading configuration."""

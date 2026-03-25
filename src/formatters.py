@@ -1027,3 +1027,111 @@ def format_redeem_error(error: str) -> str:
         f"<code>{_escape_html(error)}</code>"
     )
 
+
+def format_ensemble_signal_message(
+    signal,
+    tracker_stats,
+    trade_decision: dict,
+) -> str:
+    """Format V5 ensemble signal for Telegram.
+
+    Shows: direction, calibrated confidence, EV, regime, tier, model agreement,
+    risk mode, rolling accuracy.
+
+    Args:
+        signal: Signal dataclass instance from tracker
+        tracker_stats: TrackerStats dataclass instance
+        trade_decision: Dict from TradeManager.should_trade()
+    """
+    direction = signal.direction
+    confidence = signal.confidence
+
+    # Direction emoji
+    if direction == "UP":
+        dir_emoji = "\U0001f7e2"  # Green circle
+        dir_arrow = "\u2b06\ufe0f"   # Up arrow
+    else:
+        dir_emoji = "\U0001f534"  # Red circle
+        dir_arrow = "\u2b07\ufe0f"   # Down arrow
+
+    # Tier display
+    tier = trade_decision.get("tier")
+    if tier == 1:
+        tier_label = "Tier 1 (High Conviction)"
+        tier_emoji = "\U0001f525"  # Fire
+    elif tier == 2:
+        tier_label = "Tier 2 (Medium)"
+        tier_emoji = "\u26a1"     # Lightning
+    elif tier == 3:
+        tier_label = "Tier 3 (Base)"
+        tier_emoji = "\u2705"     # Check
+    else:
+        tier_label = "No Trade"
+        tier_emoji = "\u26d4"     # No entry
+
+    # Risk mode display
+    risk_mode = trade_decision.get("risk_mode", "NORMAL")
+    if risk_mode == "DEFENSIVE":
+        risk_emoji = "\U0001f6e1\ufe0f"  # Shield
+    elif risk_mode == "CAUTIOUS":
+        risk_emoji = "\u26a0\ufe0f"       # Warning
+    else:
+        risk_emoji = "\u2705"              # Check
+
+    # Rolling accuracy
+    rolling_acc = trade_decision.get("rolling_accuracy")
+    if rolling_acc is not None:
+        rolling_str = f"{rolling_acc:.1%}"
+    else:
+        rolling_str = "N/A (warming up)"
+
+    # Model agreement
+    model_agreement = getattr(signal, "model_agreement", None)
+    if model_agreement is not None:
+        agreement_str = f"{model_agreement}/3 agree"
+    else:
+        agreement_str = "N/A"
+
+    # Regime
+    regime_name = getattr(signal, "regime_name", None)
+    if regime_name is None:
+        regime_name = "UNKNOWN"
+
+    # EV calculation
+    ev = getattr(signal, "ev", None)
+    if ev is not None:
+        ev_str = f"{ev:+.4f}"
+        ev_label = "\u2705 Positive" if ev > 0 else "\u274c Negative"
+    else:
+        ev_str = "N/A"
+        ev_label = ""
+
+    # Stats
+    total = tracker_stats.total_signals if tracker_stats else 0
+    wins = tracker_stats.wins if tracker_stats else 0
+    losses = tracker_stats.losses if tracker_stats else 0
+    accuracy = tracker_stats.accuracy if tracker_stats else 0.0
+
+    lines = [
+        f"{dir_emoji} <b>V5 ENSEMBLE SIGNAL</b> {dir_arrow}",
+        "",
+        f"<b>Direction:</b> {direction}",
+        f"<b>Confidence:</b> {confidence:.1%}",
+        f"<b>EV:</b> {ev_str} {ev_label}",
+        "",
+        f"\U0001f30d <b>Regime:</b> {regime_name}",
+        f"\U0001f916 <b>Models:</b> {agreement_str}",
+        f"{tier_emoji} <b>Tier:</b> {tier_label}",
+        f"{risk_emoji} <b>Risk Mode:</b> {risk_mode}",
+        f"\U0001f4ca <b>Rolling Accuracy:</b> {rolling_str}",
+        "",
+        f"<b>Session:</b> {wins}W / {losses}L ({accuracy:.1%})",
+    ]
+
+    if not trade_decision.get("trade", True):
+        lines.append("")
+        reason = trade_decision.get("reason", "")
+        lines.append(f"\u26d4 <b>Trade Skipped:</b> {_escape_html(reason)}")
+
+    return "\n".join(lines)
+
