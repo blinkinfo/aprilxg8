@@ -594,6 +594,7 @@ class EnsembleModel:
         cal_probs = np.array(cal_probs)
 
         self.training_stats = {
+            "success": True,
             "oos_accuracy": oos_results["accuracy"],
             "oos_accuracy_per_regime": oos_results["accuracy_per_regime"],
             "model_accuracies": model_accuracies,
