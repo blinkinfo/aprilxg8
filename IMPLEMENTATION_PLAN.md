@@ -1003,7 +1003,14 @@ If backtest shows < 55% accuracy:
 5. **Update this file** — check off completed items, add session log entry.
 6. **Commit** with the phase message format.
 
+> **🛑 HARD STOP: ONE PHASE PER SESSION.** After completing one phase, STOP. Do not proceed to the next phase.
+
 ### Rules
+
+> **🛑 HARD STOP RULE: ONE PHASE PER SESSION.**
+> An agent MUST complete only ONE phase per session, then STOP and commit.
+> Do NOT continue to the next phase. Do NOT "get a head start." STOP.
+> This prevents exceeding usage limits and ensures review between phases.
 
 - **Do NOT skip validation criteria.** Each phase must pass ALL checks before moving on.
 - **Do NOT modify files outside the current phase** unless fixing a blocking bug from a prior phase.
