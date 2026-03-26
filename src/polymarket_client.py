@@ -17,7 +17,7 @@ Market Discovery Strategy:
     This is 100% reliable — no keyword searching needed.
 
 Slot-Targeted Trading:
-    Signals predict the NEXT 5-min candle. The bot fires ~15 seconds before
+    Signals predict the NEXT 5-min candle. The bot fires ~35 seconds before
     the current candle closes, so at 16:44:45 UTC the signal is for the
     16:45-16:50 slot. The target_slot_ts (Unix timestamp of 16:45:00) is
     passed explicitly through the entire trade pipeline to ensure the order

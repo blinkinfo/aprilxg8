@@ -171,7 +171,7 @@ class BotConfig:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     polymarket: PolymarketConfig = field(default_factory=PolymarketConfig)
     # Timing
-    prediction_lead_seconds: int = 15  # Predict N seconds before candle close
+    prediction_lead_seconds: int = 35  # Predict N seconds before candle close
     main_loop_interval: int = 5  # Check every N seconds
     # Data storage
     data_dir: str = "data"

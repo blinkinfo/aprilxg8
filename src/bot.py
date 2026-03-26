@@ -1,6 +1,6 @@
 """Main bot orchestrator - ties everything together.
 
-Preserves the 15-second pre-signal timing by design.
+Preserves the 35-second pre-signal timing by design.
 Integrates: retraining gate messaging, signal strength labels, Optuna status.
 Polymarket auto-trading: optional, purely additive after signal flow.
 
@@ -251,7 +251,7 @@ class SignalBot:
         """Main prediction loop.
 
         CRITICAL timing design:
-        - Signal fires <= 15 seconds before candle close (prediction_lead_seconds).
+        - Signal fires <= 35 seconds before candle close (prediction_lead_seconds).
           The signal is labeled for the NEXT candle (current_slot + 5min) because
           the model predicts the NEXT candle's direction (trained with shift(-1) labels).
         - Resolution fires 30-90 seconds into a new candle. It resolves any pending

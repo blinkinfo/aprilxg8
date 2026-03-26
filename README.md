@@ -22,7 +22,7 @@ AprilXG V5 is a major upgrade from V4, introducing a **3-model ensemble** with r
 
 ## 📡 How It Works
 
-1. **~15 seconds before each 5-min candle closes**, the bot fetches multi-timeframe data (5m, 15m, 1h) from MEXC
+1. **~35 seconds before each 5-min candle closes**, the bot fetches multi-timeframe data (5m, 15m, 1h) from MEXC
 2. **76 features are engineered** via `FeatureEngineV2` across 8 feature groups
 3. **Market regime is detected** (Trending Up, Trending Down, Ranging, Volatile)
 4. **3-model ensemble predicts** the next candle direction with regime-weighted soft voting
