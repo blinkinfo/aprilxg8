@@ -395,14 +395,39 @@ class SignalBot:
                 # It will be filled in during resolution when the candle data is available.
                 candle_open_price = 0.0
 
-                # Record signal with NEXT candle slot info
-                sig = self.tracker.add_signal(
-                    direction=prediction["signal"],
-                    confidence=prediction["confidence"],
-                    entry_price=prediction["current_price"],
-                    candle_slot_ts=next_slot_iso,
-                    candle_open_price=candle_open_price,
-                )
+                # --- Regime gate (V4): mirror V5 behaviour ---
+                # tracker.add_signal() only runs for regimes that are ENABLED.
+                # regime_filter.record_result() is called at resolution via
+                # _signal_regime_map, which is only populated when the signal
+                # is actually tracked (consistent with V5 design).
+                regime_name = prediction.get("regime_name", "UNKNOWN")
+                regime_allowed = self.regime_filter.is_regime_enabled(regime_name)
+
+                if regime_allowed:
+                    # Record signal with NEXT candle slot info
+                    sig = self.tracker.add_signal(
+                        direction=prediction["signal"],
+                        confidence=prediction["confidence"],
+                        entry_price=prediction["current_price"],
+                        candle_slot_ts=next_slot_iso,
+                        candle_open_price=candle_open_price,
+                    )
+                    # Store regime for result recording at resolution time
+                    self._signal_regime_map[sig.signal_id] = regime_name
+                    self._save_signal_regime_map()
+                else:
+                    # Regime disabled — build a lightweight stub so the formatter
+                    # can still render; signal is NOT persisted to tracker.
+                    from types import SimpleNamespace
+                    sig = SimpleNamespace(
+                        signal_id=None,
+                        direction=prediction["signal"],
+                        confidence=prediction["confidence"],
+                        candle_slot_ts=next_slot_iso,
+                    )
+                    logger.info(
+                        f"V4 Signal gated out: regime {regime_name} is DISABLED"
+                    )
 
                 # Send formatted signal to Telegram
                 msg = formatters.format_signal(sig, prediction)
@@ -413,12 +438,13 @@ class SignalBot:
                     f"(predicting next slot={next_slot_iso})"
                 )
 
-                # --- Polymarket Auto-Trade (purely additive) ---
+                # --- Polymarket Auto-Trade (purely additive, regime-gated) ---
+                # Only execute if the regime gate passed (signal was tracked).
                 # Pass the target slot timestamp so the trade pipeline places
                 # the order on the CORRECT Polymarket market.
                 # next_slot is the candle we're predicting (e.g. 16:45:00).
                 # Convert to Unix timestamp for Polymarket slug lookup.
-                if self.auto_trader and self.auto_trader.enabled:
+                if regime_allowed and self.auto_trader and self.auto_trader.enabled:
                     try:
                         # Ensure next_slot is timezone-aware for correct Unix ts
                         if next_slot.tzinfo is None:
