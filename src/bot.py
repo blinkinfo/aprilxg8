@@ -1,6 +1,6 @@
 """Main bot orchestrator - ties everything together.
 
-Preserves the 35-second pre-signal timing by design.
+Preserves the 90-second pre-signal timing by design.
 Integrates: retraining gate messaging, signal strength labels, Optuna status.
 Polymarket auto-trading: optional, purely additive after signal flow.
 
@@ -251,7 +251,7 @@ class SignalBot:
         """Main prediction loop.
 
         CRITICAL timing design:
-        - Signal fires <= 35 seconds before candle close (prediction_lead_seconds).
+        - Signal fires <= 90 seconds before candle close (prediction_lead_seconds).
           The signal is labeled for the NEXT candle (current_slot + 5min) because
           the model predicts the NEXT candle's direction (trained with shift(-1) labels).
         - Resolution fires 30-90 seconds into a new candle. It resolves any pending
@@ -357,7 +357,7 @@ class SignalBot:
             higher_tf = {k: v for k, v in data.items() if k != "5m" and not v.empty}
 
             # Fix D: Exclude the current in-progress candle.
-            # At signal time (~15s before close), the current candle's OHLCV
+            # At signal time (~90s before close), the current candle's OHLCV
             # is NOT finalized. The model was trained on completed candles only,
             # so we must match that at inference time.
             df_5m_completed = df_5m.iloc[:-1]  # Drop last (in-progress) candle
@@ -650,7 +650,7 @@ class SignalBot:
         current_slot, ensuring we never resolve a candle that's still live.
 
         Example timeline:
-        - Signal at 16:44:45 predicts the 16:45-16:50 candle (candle_slot_ts=16:45)
+        - Signal at 16:43:30 predicts the 16:45-16:50 candle (candle_slot_ts=16:45)
         - At 16:50:30 (current_slot=16:50), 16:45 < 16:50 -> resolvable
         - Fetches the 16:45 candle's open/close from MEXC for WIN/LOSS
 

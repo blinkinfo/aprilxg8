@@ -429,8 +429,8 @@ def test_config(results: TestResults):
         assert config.model.enable_optuna_tuning is True, "Optuna should be enabled by default"
         assert config.model.retrain_min_improvement == 0.002, f"retrain_min_improvement should be 0.002"
         assert config.model.atr_regime_lookback == 100, f"atr_regime_lookback should be 100"
-        assert config.prediction_lead_seconds == 35, f"prediction_lead_seconds should be 35 (BY DESIGN)"
-        results.ok("Default v2 config loaded correctly (incl. 35-sec lead time)")
+        assert config.prediction_lead_seconds == 90, f"prediction_lead_seconds should be 90 (BY DESIGN)"
+        results.ok("Default v2 config loaded correctly (incl. 90-sec lead time)")
 
         # Test Polymarket default config
         assert config.polymarket.private_key == "", "Polymarket key should default to empty"
@@ -482,30 +482,30 @@ def test_config(results: TestResults):
         traceback.print_exc()
 
 
-def test_35sec_timing(results: TestResults):
-    """Verify the 35-second pre-signal timing is preserved."""
-    print("\n--- Testing 15-Second Signal Timing ---")
+def test_90sec_timing(results: TestResults):
+    """Verify the 90-second pre-signal timing is preserved."""
+    print("\n--- Testing 90-Second Signal Timing ---")
     try:
         config = BotConfig()
-        assert config.prediction_lead_seconds == 35, \
-            f"CRITICAL: prediction_lead_seconds changed from 35 to {config.prediction_lead_seconds}"
-        results.ok("35-second pre-signal timing preserved in config")
+        assert config.prediction_lead_seconds == 90, \
+            f"CRITICAL: prediction_lead_seconds changed from 90 to {config.prediction_lead_seconds}"
+        results.ok("90-second pre-signal timing preserved in config")
 
         # Verify the timing logic would fire correctly
-        # At 4:25 into a candle (35 sec before close), should trigger
-        seconds_in_candle = 265  # 4 min 25 sec
+        # At 3:30 into a candle (90 sec before close), should trigger
+        seconds_in_candle = 210  # 3 min 30 sec
         candle_duration = 300
-        seconds_until_close = candle_duration - seconds_in_candle  # = 15
+        seconds_until_close = candle_duration - seconds_in_candle  # = 90
         should_trigger = seconds_until_close <= config.prediction_lead_seconds and seconds_until_close > 0
-        assert should_trigger, "Should trigger at 35 seconds before close"
-        results.ok("Timing logic: triggers at exactly 15 sec before candle close")
+        assert should_trigger, "Should trigger at 90 seconds before close"
+        results.ok("Timing logic: triggers at exactly 90 sec before candle close")
 
-        # At 4:00 into candle (60 sec before), should NOT trigger
-        seconds_in_candle = 240
-        seconds_until_close = candle_duration - seconds_in_candle  # = 60
+        # At 3:00 into candle (120 sec before), should NOT trigger
+        seconds_in_candle = 180
+        seconds_until_close = candle_duration - seconds_in_candle  # = 120
         should_not_trigger = seconds_until_close <= config.prediction_lead_seconds and seconds_until_close > 0
-        assert not should_not_trigger, "Should NOT trigger at 60 seconds before close"
-        results.ok("Timing logic: correctly skips at 30 sec before close")
+        assert not should_not_trigger, "Should NOT trigger at 120 seconds before close"
+        results.ok("Timing logic: correctly skips at 120 sec before close")
 
         # At candle close (0 sec remaining), should NOT trigger
         seconds_in_candle = 300
@@ -515,7 +515,7 @@ def test_35sec_timing(results: TestResults):
         results.ok("Timing logic: correctly skips at exact candle close")
 
     except Exception as e:
-        results.fail("35-sec Timing", f"{type(e).__name__}: {e}")
+        results.fail("90-sec Timing", f"{type(e).__name__}: {e}")
         traceback.print_exc()
 
 
@@ -981,8 +981,8 @@ async def run_all_tests():
     # Test 1: Config (v2 + Polymarket)
     test_config(results)
 
-    # Test 2: 35-second timing preservation
-    test_35sec_timing(results)
+    # Test 2: 90-second timing preservation
+    test_90sec_timing(results)
 
     # Test 3: MEXC API
     df_5m, df_15m, df_1h, df_hist = await test_mexc_api(results)

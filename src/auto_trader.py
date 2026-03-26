@@ -12,7 +12,7 @@ Slot-Targeted Trading:
     5-min slot the prediction is for. This is passed through the entire pipeline
     to ensure the Polymarket order lands on the correct market.
 
-    Example: Signal fires at 16:44:45 for the 16:45-16:50 slot.
+    Example: Signal fires at 16:43:30 for the 16:45-16:50 slot.
     target_slot_ts = 1774025100 (Unix ts of 16:45:00 UTC).
     This ensures we trade the 16:45 market, NOT the 16:40 market.
 """
