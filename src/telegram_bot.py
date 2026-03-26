@@ -59,6 +59,8 @@ _BOT_COMMANDS = [
     BotCommand("positions", "View open Polymarket positions"),
     BotCommand("pmstatus", "Full Polymarket connection status"),
     BotCommand("redeem", "Redeem resolved Polymarket positions"),
+    BotCommand("regime", "Toggle regime filters ON/OFF"),
+    BotCommand("regimestats", "Per-regime performance stats"),
 ]
 
 
@@ -75,6 +77,10 @@ class TelegramBot:
         self._retrain_callback: Optional[Callable[[], Awaitable[str]]] = None
         self._retrain_decision_callback: Optional[Callable[[str], Awaitable[str]]] = None
         self._forcetune_callback: Optional[Callable[[], Awaitable[str]]] = None
+        # Regime filter callbacks
+        self._regime_callback: Optional[Callable[[], Awaitable[dict]]] = None
+        self._regimestats_callback: Optional[Callable[[], Awaitable[str]]] = None
+        self._regime_toggle_callback: Optional[Callable[[str], Awaitable[dict]]] = None
         # Polymarket callbacks
         self._autotrade_toggle_callback: Optional[Callable[[], Awaitable[str]]] = None
         self._set_amount_callback: Optional[Callable[[float], Awaitable[str]]] = None
@@ -96,6 +102,9 @@ class TelegramBot:
         positions_cb: Optional[Callable[[], Awaitable[str]]] = None,
         pmstatus_cb: Optional[Callable[[], Awaitable[str]]] = None,
         redeem_cb: Optional[Callable[[], Awaitable[str]]] = None,
+        regime_cb: Optional[Callable[[], Awaitable[dict]]] = None,
+        regimestats_cb: Optional[Callable[[], Awaitable[str]]] = None,
+        regime_toggle_cb: Optional[Callable[[str], Awaitable[dict]]] = None,
     ):
         """Set callback functions for bot commands."""
         self._stats_callback = stats_cb
@@ -110,6 +119,9 @@ class TelegramBot:
         self._positions_callback = positions_cb
         self._pmstatus_callback = pmstatus_cb
         self._redeem_cb = redeem_cb
+        self._regime_callback = regime_cb
+        self._regimestats_callback = regimestats_cb
+        self._regime_toggle_callback = regime_toggle_cb
 
     async def initialize(self):
         """Initialize the bot, register handlers, and set menu commands."""
@@ -140,7 +152,10 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("pmstatus", self._cmd_pmstatus))
         # Redemption command
         self.application.add_handler(CommandHandler("redeem", self._handle_redeem))
-        # Inline button callback handler (for retrain swap/keep decisions)
+        # Regime filter commands
+        self.application.add_handler(CommandHandler("regime", self._cmd_regime))
+        self.application.add_handler(CommandHandler("regimestats", self._cmd_regimestats))
+        # Inline button callback handler (for retrain swap/keep and regime toggle decisions)
         self.application.add_handler(CallbackQueryHandler(self._handle_callback_query))
 
         await self.application.initialize()
@@ -394,8 +409,60 @@ class TelegramBot:
             except Exception:
                 # If editing fails (e.g. message too old), send as new message
                 await query.message.reply_text(text, parse_mode="HTML")
+
+        elif data.startswith("regime_toggle_"):
+            regime_name = data.replace("regime_toggle_", "")
+            if self._regime_toggle_callback:
+                result = await self._regime_toggle_callback(regime_name)
+                # result is dict: {text, dashboard_text, keyboard}
+                try:
+                    # Update the dashboard message in-place with new toggle states
+                    await query.edit_message_text(
+                        text=result["dashboard_text"],
+                        parse_mode="HTML",
+                        reply_markup=result["keyboard"],
+                    )
+                except Exception:
+                    pass
+                # Send toggle confirmation as a new message
+                try:
+                    await query.message.reply_text(
+                        result["text"], parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send regime toggle confirmation: {e}")
+            else:
+                await query.message.reply_text(
+                    "\u26a0\ufe0f Regime filter not available.", parse_mode="HTML"
+                )
+
         else:
             logger.warning(f"Unknown callback query data: {data}")
+
+    # --- Regime Filter Command Handlers ---
+
+    async def _cmd_regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /regime command - show regime dashboard with toggle buttons."""
+        if self._regime_callback:
+            result = await self._regime_callback()
+            # result is dict: {text, keyboard}
+            await update.message.reply_text(
+                result["text"],
+                parse_mode="HTML",
+                reply_markup=result["keyboard"],
+            )
+        else:
+            await update.message.reply_text(
+                "\U0001f30d Regime filter not available.", parse_mode="HTML"
+            )
+
+    async def _cmd_regimestats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /regimestats command - show detailed per-regime performance."""
+        if self._regimestats_callback:
+            text = await self._regimestats_callback()
+        else:
+            text = "\U0001f4ca Regime stats not available."
+        await update.message.reply_text(text, parse_mode="HTML")
 
     # --- Polymarket Command Handlers ---
 

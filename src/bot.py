@@ -40,6 +40,7 @@ from .position_redeemer import PositionRedeemer
 from .ensemble import EnsembleModel
 from .features_v2 import FeatureEngineV2
 from .trade_manager import TradeManager
+from .regime_filter import RegimeFilter, REGIME_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,11 @@ class SignalBot:
         self.auto_trader = None
         self.position_redeemer = None
         self._last_redeem_check_ts = 0.0
+
+        # Regime filter (persistent per-regime enable/disable + W/L tracking)
+        self.regime_filter = RegimeFilter(data_dir=config.data_dir)
+        # Map signal_id -> regime_name for result recording at resolution time
+        self._signal_regime_map: dict[int, str] = {}
 
         # V5 Ensemble components
         self.ensemble_config = config.ensemble
@@ -140,6 +146,9 @@ class SignalBot:
             positions_cb=self._get_positions_text,
             pmstatus_cb=self._get_pmstatus_text,
             redeem_cb=self._redeem_positions_text,
+            regime_cb=self._handle_regime_dashboard,
+            regimestats_cb=self._handle_regimestats,
+            regime_toggle_cb=self._handle_regime_toggle,
         )
         await self.telegram.start_polling()
 
@@ -502,6 +511,13 @@ class SignalBot:
             # Get trade decision from trade manager
             trade_decision = self.trade_manager.should_trade(prediction)
 
+            # Regime filter: skip trade if regime is disabled
+            regime_name = prediction.get("regime_name", "UNKNOWN")
+            if trade_decision["trade"] and not self.regime_filter.is_regime_enabled(regime_name):
+                trade_decision["trade"] = False
+                trade_decision["tier"] = None
+                trade_decision["reason"] = f"Regime {regime_name} is DISABLED via /regime filter"
+
             # Current price from last completed candle
             current_price = float(df_5m_completed["close"].iloc[-1])
             prediction["current_price"] = current_price
@@ -520,6 +536,8 @@ class SignalBot:
                     candle_slot_ts=next_slot_iso,
                     candle_open_price=candle_open_price,
                 )
+                # Store regime for this signal so we can record results at resolution
+                self._signal_regime_map[sig.signal_id] = regime_name
             else:
                 # Lightweight stand-in for the formatter (not tracked)
                 from types import SimpleNamespace
@@ -532,9 +550,12 @@ class SignalBot:
             # Get stats for formatter (only contains tracked/tradeable signals)
             stats = self.tracker.get_stats()
 
-            # Send V5 formatted signal message
+            # Send V5 formatted signal message (with per-regime stats)
+            regime_summaries = self.regime_filter.get_all_regime_summaries()
+            regime_enabled_map = self.regime_filter.enabled
             msg = formatters.format_ensemble_signal_message(
                 sig, stats, trade_decision, prediction=prediction,
+                regime_summaries=regime_summaries, regime_enabled=regime_enabled_map,
             )
             await self.telegram.send_message(msg)
 
@@ -726,6 +747,11 @@ class SignalBot:
                     if self.trade_manager and resolved.result in ("WIN", "LOSS"):
                         self.trade_manager.record_result(resolved.result == "WIN")
 
+                    # Record result in regime filter (tradeable signals only)
+                    sig_regime = self._signal_regime_map.pop(resolved.signal_id, None)
+                    if sig_regime and resolved.result in ("WIN", "LOSS"):
+                        self.regime_filter.record_result(sig_regime, resolved.result)
+
         except Exception as e:
             logger.error(f"Signal resolution error: {e}", exc_info=True)
 
@@ -800,6 +826,11 @@ class SignalBot:
                     # Update trade manager rolling accuracy
                     if self.trade_manager and resolved.result in ("WIN", "LOSS"):
                         self.trade_manager.record_result(resolved.result == "WIN")
+
+                    # Record result in regime filter (stale signals)
+                    sig_regime = self._signal_regime_map.pop(resolved.signal_id, None)
+                    if sig_regime and resolved.result in ("WIN", "LOSS"):
+                        self.regime_filter.record_result(sig_regime, resolved.result)
 
             if resolved_count > 0:
                 logger.info(f"Resolved {resolved_count} stale signals at startup")
@@ -1008,6 +1039,51 @@ class SignalBot:
     def _pending_comparison(self) -> bool:
         """Check if there is a pending model awaiting user decision."""
         return self.model._pending_model is not None
+
+    # --- Regime filter callback methods ---
+
+    async def _handle_regime_dashboard(self) -> dict:
+        """Handle /regime command - return dashboard text + toggle keyboard."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        dashboard_data = self.regime_filter.get_dashboard_data()
+        text = formatters.format_regime_dashboard(dashboard_data)
+        keyboard = self._build_regime_keyboard()
+        return {"text": text, "keyboard": keyboard}
+
+    async def _handle_regimestats(self) -> str:
+        """Handle /regimestats command - return detailed per-regime performance."""
+        summaries = self.regime_filter.get_all_regime_summaries()
+        enabled = self.regime_filter.enabled
+        return formatters.format_regime_stats(summaries, enabled)
+
+    async def _handle_regime_toggle(self, regime_name: str) -> dict:
+        """Handle regime toggle button press - toggle and return updated dashboard."""
+        new_state = self.regime_filter.toggle_regime(regime_name)
+        toggle_text = formatters.format_regime_toggle_result(regime_name, new_state)
+        dashboard_data = self.regime_filter.get_dashboard_data()
+        dashboard_text = formatters.format_regime_dashboard(dashboard_data)
+        keyboard = self._build_regime_keyboard()
+        return {
+            "text": toggle_text,
+            "dashboard_text": dashboard_text,
+            "keyboard": keyboard,
+        }
+
+    def _build_regime_keyboard(self):
+        """Build inline keyboard with regime toggle buttons."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        regime_order = ["TRENDING_UP", "TRENDING_DOWN", "RANGING", "VOLATILE"]
+        buttons = []
+        for rname in regime_order:
+            enabled = self.regime_filter.enabled.get(rname, True)
+            emoji = "\u2705" if enabled else "\u274c"
+            buttons.append([
+                InlineKeyboardButton(
+                    f"{emoji} {rname}",
+                    callback_data=f"regime_toggle_{rname}",
+                ),
+            ])
+        return InlineKeyboardMarkup(buttons)
 
     # --- Polymarket callback methods ---
 
