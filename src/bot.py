@@ -92,8 +92,10 @@ class SignalBot:
 
         # Regime filter (persistent per-regime enable/disable + W/L tracking)
         self.regime_filter = RegimeFilter(data_dir=config.data_dir)
-        # Map signal_id -> regime_name for result recording at resolution time
-        self._signal_regime_map: dict[int, str] = {}
+        # Map signal_id -> regime_name for result recording at resolution time.
+        # Bug 6 fix: persisted to disk so it survives restarts.
+        self._signal_regime_map_path = os.path.join(config.data_dir, "signal_regime_map.json")
+        self._signal_regime_map: dict[int, str] = self._load_signal_regime_map()
 
         # V5 Ensemble components
         self.ensemble_config = config.ensemble
@@ -508,15 +510,20 @@ class SignalBot:
                     logger.info("V5: Prediction returned None")
                 return
 
-            # Get trade decision from trade manager
-            trade_decision = self.trade_manager.should_trade(prediction)
-
-            # Regime filter: skip trade if regime is disabled
+            # Bug 1 fix: check regime gate BEFORE should_trade() so trade
+            # counters only increment on signals that pass both filters.
             regime_name = prediction.get("regime_name", "UNKNOWN")
-            if trade_decision["trade"] and not self.regime_filter.is_regime_enabled(regime_name):
-                trade_decision["trade"] = False
-                trade_decision["tier"] = None
-                trade_decision["reason"] = f"Regime {regime_name} is DISABLED via /regime filter"
+            if not self.regime_filter.is_regime_enabled(regime_name):
+                trade_decision = {
+                    "trade": False,
+                    "tier": None,
+                    "reason": f"Regime {regime_name} is DISABLED via /regime filter",
+                    "risk_mode": self.trade_manager.risk_mode,
+                    "rolling_accuracy": None,
+                }
+            else:
+                # Get trade decision from trade manager (counters only increment here)
+                trade_decision = self.trade_manager.should_trade(prediction)
 
             # Current price from last completed candle
             current_price = float(df_5m_completed["close"].iloc[-1])
@@ -538,10 +545,14 @@ class SignalBot:
                 )
                 # Store regime for this signal so we can record results at resolution
                 self._signal_regime_map[sig.signal_id] = regime_name
+                self._save_signal_regime_map()  # Bug 6 fix: persist immediately
             else:
                 # Lightweight stand-in for the formatter (not tracked)
+                # Bug 4 fix: include signal_id=None so formatters that access
+                # sig.signal_id don't raise AttributeError.
                 from types import SimpleNamespace
                 sig = SimpleNamespace(
+                    signal_id=None,
                     direction=prediction["signal"],
                     confidence=prediction["confidence"],
                     candle_slot_ts=next_slot_iso,
@@ -749,6 +760,8 @@ class SignalBot:
 
                     # Record result in regime filter (tradeable signals only)
                     sig_regime = self._signal_regime_map.pop(resolved.signal_id, None)
+                    if sig_regime:
+                        self._save_signal_regime_map()  # Bug 6 fix: persist after pop
                     if sig_regime and resolved.result in ("WIN", "LOSS"):
                         self.regime_filter.record_result(sig_regime, resolved.result)
 
@@ -829,6 +842,8 @@ class SignalBot:
 
                     # Record result in regime filter (stale signals)
                     sig_regime = self._signal_regime_map.pop(resolved.signal_id, None)
+                    if sig_regime:
+                        self._save_signal_regime_map()  # Bug 6 fix: persist after pop
                     if sig_regime and resolved.result in ("WIN", "LOSS"):
                         self.regime_filter.record_result(sig_regime, resolved.result)
 
@@ -1039,6 +1054,33 @@ class SignalBot:
     def _pending_comparison(self) -> bool:
         """Check if there is a pending model awaiting user decision."""
         return self.model._pending_model is not None
+
+    # --- Signal regime map persistence (Bug 6 fix) ---
+
+    def _load_signal_regime_map(self) -> dict:
+        """Load _signal_regime_map from disk. Returns empty dict on any error."""
+        import json
+        try:
+            if os.path.exists(self._signal_regime_map_path):
+                with open(self._signal_regime_map_path, "r") as f:
+                    raw = json.load(f)
+                # JSON keys are always strings; convert back to int signal_ids
+                loaded = {int(k): v for k, v in raw.items()}
+                logger.info(f"Loaded {len(loaded)} entries from signal_regime_map.json")
+                return loaded
+        except Exception as e:
+            logger.warning(f"Could not load signal_regime_map.json: {e}")
+        return {}
+
+    def _save_signal_regime_map(self) -> None:
+        """Persist _signal_regime_map to disk (best-effort, never raises)."""
+        import json
+        try:
+            os.makedirs(os.path.dirname(self._signal_regime_map_path) or ".", exist_ok=True)
+            with open(self._signal_regime_map_path, "w") as f:
+                json.dump({str(k): v for k, v in self._signal_regime_map.items()}, f)
+        except Exception as e:
+            logger.warning(f"Could not save signal_regime_map.json: {e}")
 
     # --- Regime filter callback methods ---
 
