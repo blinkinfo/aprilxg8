@@ -50,9 +50,9 @@ class RegimeFilter:
         self.enabled: dict[str, bool] = dict(DEFAULT_ENABLED)
 
         # Per-regime stats for tradable signals only
-        # {"TRENDING_UP": {"wins": 0, "losses": 0, "neutral": 0}, ...}
+        # {"TRENDING_UP": {"wins": 0, "losses": 0}, ...}
         self.regime_stats: dict[str, dict[str, int]] = {
-            name: {"wins": 0, "losses": 0, "neutral": 0}
+            name: {"wins": 0, "losses": 0}
             for name in REGIME_NAMES.values()
         }
 
@@ -119,14 +119,12 @@ class RegimeFilter:
             result: "WIN", "LOSS", or "NEUTRAL"
         """
         if regime_name not in self.regime_stats:
-            self.regime_stats[regime_name] = {"wins": 0, "losses": 0, "neutral": 0}
+            self.regime_stats[regime_name] = {"wins": 0, "losses": 0}
 
         if result == "WIN":
             self.regime_stats[regime_name]["wins"] += 1
         elif result == "LOSS":
             self.regime_stats[regime_name]["losses"] += 1
-        elif result == "NEUTRAL":
-            self.regime_stats[regime_name]["neutral"] += 1
 
         self._save()
         logger.debug(f"Regime {regime_name}: recorded {result} -> {self.regime_stats[regime_name]}")
@@ -135,13 +133,12 @@ class RegimeFilter:
         """Get W/L summary for a specific regime.
 
         Returns:
-            {"wins": int, "losses": int, "neutral": int,
+            {"wins": int, "losses": int,
              "total": int, "win_rate": float, "pnl": float}
         """
-        stats = self.regime_stats.get(regime_name, {"wins": 0, "losses": 0, "neutral": 0})
+        stats = self.regime_stats.get(regime_name, {"wins": 0, "losses": 0})
         wins = stats["wins"]
         losses = stats["losses"]
-        neutral = stats["neutral"]
         decided = wins + losses
         win_rate = (wins / decided * 100) if decided > 0 else 0.0
         pnl = (wins * WIN_PAYOUT) - (losses * LOSS_PAYOUT)
@@ -149,8 +146,7 @@ class RegimeFilter:
         return {
             "wins": wins,
             "losses": losses,
-            "neutral": neutral,
-            "total": decided + neutral,
+            "total": decided,
             "decided": decided,
             "win_rate": win_rate,
             "pnl": pnl,
@@ -231,7 +227,6 @@ class RegimeFilter:
                     self.regime_stats[name] = {
                         "wins": saved_stats[name].get("wins", 0),
                         "losses": saved_stats[name].get("losses", 0),
-                        "neutral": saved_stats[name].get("neutral", 0),
                     }
 
             logger.info(

@@ -1237,7 +1237,7 @@ def format_regime_stats(regime_summaries: dict, regime_enabled: dict) -> str:
             continue
 
         enabled = regime_enabled.get(rname, True)
-        status = "\u2705" if enabled else "\u274c OFF"
+        status = "\u2705 ON" if enabled else "\u274c OFF"
 
         w = summary.get("wins", 0)
         l = summary.get("losses", 0)

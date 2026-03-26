@@ -461,6 +461,8 @@ class EnsembleModel:
         top_n_features = 25
 
         # --- 5. Momentum Model (XGBoost) — TRENDING regimes ---
+        mom_acc = None
+        mr_acc = None
         trending_mask = regimes_inner.isin(
             [RegimeDetector.TRENDING_UP, RegimeDetector.TRENDING_DOWN]
         )
