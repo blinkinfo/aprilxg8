@@ -1033,16 +1033,21 @@ def format_ensemble_signal_message(
     tracker_stats,
     trade_decision: dict,
     prediction: dict = None,
+    regime_summaries: dict = None,
+    regime_enabled: dict = None,
 ) -> str:
     """Format V5 ensemble signal for Telegram.
 
     Shows: direction, calibrated confidence, EV, regime, tier, model agreement,
-    risk mode, rolling accuracy.
+    risk mode, rolling accuracy, and per-regime performance.
 
     Args:
         signal: Signal dataclass instance from tracker
         tracker_stats: TrackerStats dataclass instance
         trade_decision: Dict from TradeManager.should_trade()
+        prediction: Dict with model outputs (confidence, ev, regime, agreement)
+        regime_summaries: Dict of {regime_name: summary_dict} from RegimeFilter
+        regime_enabled: Dict of {regime_name: bool} from RegimeFilter
     """
     direction = signal.direction
     confidence = signal.confidence
@@ -1135,6 +1140,24 @@ def format_ensemble_signal_message(
         lines.append("")
         reason = trade_decision.get("reason", "")
         lines.append(f"\u26d4 <b>Trade Skipped:</b> {_escape_html(reason)}")
+
+    # Per-regime performance for the current regime (if available)
+    if regime_summaries and regime_name and regime_name in regime_summaries:
+        rs = regime_summaries[regime_name]
+        r_decided = rs.get("decided", 0)
+        if r_decided > 0:
+            r_w = rs.get("wins", 0)
+            r_l = rs.get("losses", 0)
+            r_wr = rs.get("win_rate", 0.0)
+            r_pnl = rs.get("pnl", 0.0)
+            r_pnl_sign = "+" if r_pnl >= 0 else ""
+            r_enabled = (regime_enabled or {}).get(regime_name, True)
+            r_status = "ON" if r_enabled else "OFF"
+            lines.append("")
+            lines.append(
+                f"\U0001f30d <b>Regime {regime_name}:</b> "
+                f"{r_w}W/{r_l}L ({r_wr:.1f}%) {r_pnl_sign}${abs(r_pnl):.2f} [{r_status}]"
+            )
 
     return "\n".join(lines)
 
