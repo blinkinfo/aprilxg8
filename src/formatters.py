@@ -1138,3 +1138,137 @@ def format_ensemble_signal_message(
 
     return "\n".join(lines)
 
+
+
+
+# ============================================================
+# REGIME FILTER FORMATTERS
+# ============================================================
+
+def format_regime_dashboard(dashboard_data: list) -> str:
+    """Format the regime filter dashboard with toggle states and per-regime stats.
+
+    Args:
+        dashboard_data: List of dicts from RegimeFilter.get_dashboard_data()
+            Each dict: {name, regime_id, enabled, wins, losses, decided, win_rate, pnl}
+
+    Returns:
+        HTML-formatted message string
+    """
+    lines = [
+        "\U0001f30d  <b>REGIME FILTER</b>",
+        "",
+        "<code>",
+    ]
+
+    for item in dashboard_data:
+        name = item["name"]
+        enabled = item["enabled"]
+        wins = item["wins"]
+        losses = item["losses"]
+        decided = item["decided"]
+        win_rate = item["win_rate"]
+        pnl = item["pnl"]
+
+        status = "\u2705 ON " if enabled else "\u274c OFF"
+
+        if decided > 0:
+            pnl_sign = "+" if pnl >= 0 else ""
+            lines.append(
+                f"  {name:<15s} [{status}]  {wins}W/{losses}L ({win_rate:.1f}%)  {pnl_sign}${abs(pnl):.2f}"
+            )
+        else:
+            lines.append(f"  {name:<15s} [{status}]  No trades yet")
+
+    lines.append("</code>")
+    lines.append("")
+    lines.append("Tap a regime to toggle:")
+
+    return "\n".join(lines)
+
+
+def format_regime_stats(regime_summaries: dict, regime_enabled: dict) -> str:
+    """Format detailed per-regime performance stats.
+
+    Args:
+        regime_summaries: Dict of {regime_name: summary_dict} from RegimeFilter.get_all_regime_summaries()
+        regime_enabled: Dict of {regime_name: bool} from RegimeFilter.enabled
+
+    Returns:
+        HTML-formatted message string
+    """
+    lines = [
+        "\U0001f4ca  <b>REGIME PERFORMANCE</b>",
+        "",
+        "<i>Tradeable signals only</i>",
+        "",
+    ]
+
+    regime_order = ["TRENDING_UP", "TRENDING_DOWN", "RANGING", "VOLATILE"]
+    total_wins = 0
+    total_losses = 0
+
+    for rname in regime_order:
+        summary = regime_summaries.get(rname)
+        if summary is None:
+            continue
+
+        enabled = regime_enabled.get(rname, True)
+        status = "\u2705" if enabled else "\u274c OFF"
+
+        w = summary.get("wins", 0)
+        l = summary.get("losses", 0)
+        wr = summary.get("win_rate", 0.0)
+        pnl = summary.get("pnl", 0.0)
+        decided = summary.get("decided", 0)
+
+        total_wins += w
+        total_losses += l
+
+        lines.append(f"{status} <b>{rname}</b>")
+
+        if decided > 0:
+            pnl_sign = "+" if pnl >= 0 else ""
+            # Win rate color hint
+            if wr >= 55:
+                wr_icon = "\U0001f7e2"
+            elif wr >= 52:
+                wr_icon = "\U0001f7e1"
+            else:
+                wr_icon = "\U0001f534"
+            lines.append(
+                f"<code>  {w}W / {l}L    {wr_icon} {wr:.1f}%    P&amp;L {pnl_sign}${abs(pnl):.2f}</code>"
+            )
+        else:
+            lines.append("<code>  No trades yet</code>")
+
+        lines.append("")
+
+    # Overall summary
+    total_decided = total_wins + total_losses
+    if total_decided > 0:
+        overall_wr = total_wins / total_decided * 100
+        overall_pnl = (total_wins * 0.96) - (total_losses * 1.00)
+        overall_sign = "+" if overall_pnl >= 0 else ""
+        lines.append(
+            f"<b>Overall:</b> {total_wins}W / {total_losses}L ({overall_wr:.1f}%) "
+            f"{overall_sign}${abs(overall_pnl):.2f}"
+        )
+
+    return "\n".join(lines)
+
+
+def format_regime_toggle_result(regime_name: str, enabled: bool) -> str:
+    """Format the result of a regime toggle action.
+
+    Args:
+        regime_name: Regime that was toggled
+        enabled: New enabled state
+
+    Returns:
+        HTML-formatted confirmation string
+    """
+    if enabled:
+        return f"\u2705  <b>{regime_name}</b> is now <b>ENABLED</b>\n\nTrades will be placed for this regime."
+    else:
+        return f"\u274c  <b>{regime_name}</b> is now <b>DISABLED</b>\n\nTrades will be skipped for this regime."
